@@ -23,6 +23,7 @@ export class PluginHost {
     private readonly events: EventBus,
     private readonly toolbar: ToolbarSlot,
     private readonly panel: PanelSlot,
+    private readonly viewportElement: HTMLElement,
   ) {}
 
   install(plugin: PlantScopePlugin): void {
@@ -36,7 +37,7 @@ export class PluginHost {
       viewer: this.facade,
       rest: this.rest,
       events: this.events,
-      ui: { toolbar: this.toolbar, panel: this.panel },
+      ui: { toolbar: this.toolbar, panel: this.panel, viewportElement: this.viewportElement },
     };
     plugin.onActivate(ctx);
 

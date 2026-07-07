@@ -1,4 +1,11 @@
-import type { BoundingBox, ModelInfo, ObjectSummary, PickResult, TreeNode } from '@plantscope/shared';
+import type {
+  BoundingBox,
+  ModelInfo,
+  ObjectSummary,
+  PickResult,
+  TreeNode,
+  Vector3Like,
+} from '@plantscope/shared';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -12,10 +19,17 @@ import { PluginHost } from './internal/pluginHost';
 import { RestClientImpl } from './internal/restClient';
 import { buildSceneRegistry, searchSceneObjects, type SceneObjectRecord } from './internal/sceneRegistry';
 import type { PickRange } from './internal/picking';
-import type { PlantScopePlugin } from './plugin';
+import type { PlantScopePlugin, RestClient } from './plugin';
 
 export interface ViewerOptions {
   apiUrl?: string;
+  /**
+   * Override the RestClient handed to plugins via `PluginContext.rest`. Defaults to a
+   * fetch-based client against `apiUrl`. Phase 2 plugins use this to inject an in-memory
+   * mock (no real API server exists until Phase 3) — see `@plantscope/plugins`'
+   * `createMockRestClient`.
+   */
+  restClient?: RestClient;
 }
 
 interface ObjectRecord extends SceneObjectRecord {
@@ -61,7 +75,8 @@ export class Viewer {
   private readonly gltfLoader: GLTFLoader;
   private readonly dracoLoader: DRACOLoader;
   private readonly raycaster: THREE.Raycaster;
-  private readonly restClient: RestClientImpl;
+  private readonly apiBaseUrl: string;
+  private readonly restClient: RestClient;
   private readonly events: EventBusImpl;
   private readonly pluginHost: PluginHost;
   private readonly resizeObserver: ResizeObserver;
@@ -104,7 +119,8 @@ export class Viewer {
     this.gltfLoader.setDRACOLoader(this.dracoLoader);
 
     this.raycaster = new THREE.Raycaster();
-    this.restClient = new RestClientImpl(opts.apiUrl ?? '');
+    this.apiBaseUrl = opts.apiUrl ?? '';
+    this.restClient = opts.restClient ?? new RestClientImpl(this.apiBaseUrl);
     this.events = new EventBusImpl();
     this.pluginHost = new PluginHost(
       this,
@@ -112,6 +128,7 @@ export class Viewer {
       this.events,
       createToolbarSlot(this.container),
       createPanelSlot(this.container),
+      this.container,
     );
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -139,7 +156,7 @@ export class Viewer {
       id = generateId();
       name = 'model';
     } else {
-      const url = `${this.restClient.baseUrl}/models/${source.id}/binary`;
+      const url = `${this.apiBaseUrl}/models/${source.id}/binary`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to fetch model "${source.id}": ${res.status}`);
       arrayBuffer = await res.arrayBuffer();
@@ -289,6 +306,32 @@ export class Viewer {
     const record = this.objectRecords.get(objectId);
     if (!record) return;
     this.frameBox(record.bbox);
+  }
+
+  /** Frames the union of the given objects' bboxes — e.g. zooming to a plugin-defined zone. */
+  zoomToObjects(objectIds: string[]): void {
+    let union: THREE.Box3 | null = null;
+    for (const id of objectIds) {
+      const record = this.objectRecords.get(id);
+      if (!record) continue;
+      union = union ? union.union(record.bbox) : record.bbox.clone();
+    }
+    if (union) this.frameBox(union);
+  }
+
+  /** World-space bbox + centroid for one object — e.g. for a plugin's zone footprint hull. */
+  getObjectBounds(objectId: string): { bbox: BoundingBox; centroid: Vector3Like } | null {
+    const record = this.objectRecords.get(objectId);
+    if (!record) return null;
+    return {
+      bbox: toSharedBoundingBox(record.bbox),
+      centroid: { x: record.centroid.x, y: record.centroid.y, z: record.centroid.z },
+    };
+  }
+
+  /** Suspends/resumes OrbitControls — e.g. while a plugin runs its own drag gesture. */
+  setOrbitEnabled(enabled: boolean): void {
+    this.controls.enabled = enabled;
   }
 
   getModelTree(): TreeNode {

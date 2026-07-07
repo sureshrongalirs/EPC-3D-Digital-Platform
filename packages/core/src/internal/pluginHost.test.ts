@@ -14,8 +14,10 @@ function createHost() {
   const events = new EventBusImpl();
   const toolbar: ToolbarSlot = { addButton: vi.fn(), removeButton: vi.fn() };
   const panel: PanelSlot = { addPanel: vi.fn(), removePanel: vi.fn() };
-  const host = new PluginHost(fakeViewer, rest, events, toolbar, panel);
-  return { host, fakeViewer, rest, events, toolbar, panel };
+  // Type-only stub (no real DOM created) — keeps this test free of jsdom, same as `fakeViewer`.
+  const viewportElement = {} as HTMLElement;
+  const host = new PluginHost(fakeViewer, rest, events, toolbar, panel, viewportElement);
+  return { host, fakeViewer, rest, events, toolbar, panel, viewportElement };
 }
 
 function makePlugin(overrides: Partial<PlantScopePlugin> = {}): PlantScopePlugin {
@@ -47,7 +49,7 @@ describe('PluginHost', () => {
   });
 
   it('passes the facade, rest client, events, and UI slots into onActivate', () => {
-    const { host, fakeViewer, rest, events, toolbar, panel } = createHost();
+    const { host, fakeViewer, rest, events, toolbar, panel, viewportElement } = createHost();
     const onActivate = vi.fn();
     host.install(makePlugin({ onActivate }));
 
@@ -55,7 +57,7 @@ describe('PluginHost', () => {
       viewer: fakeViewer,
       rest,
       events,
-      ui: { toolbar, panel },
+      ui: { toolbar, panel, viewportElement },
     });
   });
 
@@ -123,7 +125,15 @@ describe('PluginHost', () => {
     host.notifyModelLoaded(modelInfo);
     expect(modelLoadedSpy).toHaveBeenCalledWith(modelInfo);
 
-    const zone = { id: 'z1', name: 'Zone A', objectIds: ['obj-1'] };
+    const zone = {
+      id: 'z1',
+      name: 'Zone A',
+      color: '#ff0000',
+      members: ['obj-1'],
+      footprint: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+      zmin: 0,
+      zmax: 1,
+    };
     host.notifyZoneCreated(zone);
     expect(zoneCreatedSpy).toHaveBeenCalledWith(zone);
 

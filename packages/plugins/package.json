@@ -19,6 +19,11 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@plantscope/core": "workspace:*"
+    "@plantscope/core": "workspace:*",
+    "@plantscope/shared": "workspace:*",
+    "leaflet": "^1.9.4"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.14"
   }
 }

@@ -1,5 +1,8 @@
 import type { PickResult } from '@plantscope/core';
 import { Viewer } from '@plantscope/core';
+import { createLinkageMetadataPlugin, createMapGeorefPlugin, createMockRestClient, createZonesPlugin } from '@plantscope/plugins';
+
+import { linkageKeyByNodeName, mockComponents, mockLabelIndex } from './mockData';
 
 function required<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -19,7 +22,20 @@ function appendLog(message: string): void {
   log.textContent = `${time}  ${message}\n${log.textContent ?? ''}`;
 }
 
-const viewer = new Viewer(viewerContainer, {});
+// No real API server exists until Phase 3 — this in-memory mock stands in behind the same
+// RestClient interface every plugin uses via PluginContext.rest.
+const mockRestClient = createMockRestClient({ components: mockComponents });
+
+const viewer = new Viewer(viewerContainer, { restClient: mockRestClient });
+
+viewer.use(createZonesPlugin());
+viewer.use(createMapGeorefPlugin());
+viewer.use(
+  createLinkageMetadataPlugin({
+    linkageKeyByNodeName,
+    labelIndex: mockLabelIndex,
+  }),
+);
 
 let lastPickedId: string | null = null;
 
