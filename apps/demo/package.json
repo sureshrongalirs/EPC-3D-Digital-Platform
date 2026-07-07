@@ -11,7 +11,9 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@plantscope/core": "workspace:*"
+    "@plantscope/core": "workspace:*",
+    "@plantscope/plugins": "workspace:*",
+    "@plantscope/shared": "workspace:*"
   },
   "devDependencies": {
     "vite": "^6.0.5"
