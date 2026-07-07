@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.log
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Real client sample files — synthetic fixtures for CI live in testdata/ instead.
+/testdata/local/
+
+# docker-compose bind-mount data (postgres data dir, converted models)
+deploy/data/
