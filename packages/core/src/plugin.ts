@@ -45,6 +45,13 @@ export interface PluginContext {
   ui: {
     toolbar: ToolbarSlot;
     panel: PanelSlot;
+    /**
+     * The viewer's container element, for plugins that need their own pointer/drag
+     * interactions over the viewport (e.g. ZonesPlugin's box-select). Never the canvas or
+     * any three.js object — plain DOM, per CLAUDE.md invariant #1. Attach listeners rather
+     * than replacing children; the renderer canvas and other plugins' UI slots live here too.
+     */
+    viewportElement: HTMLElement;
   };
 }
 
