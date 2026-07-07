@@ -40,10 +40,27 @@ export interface ModelInfo {
   bbox: BoundingBox;
 }
 
+/**
+ * A 2D point in a horizontal-plane projection. Producers (e.g. @plantscope/core's
+ * `getObjectBounds`) map this to world X/Z (three.js is Y-up); consumers (zone footprints,
+ * the local-tangent-plane georef math below) agree on that same convention.
+ */
+export interface Point2D {
+  x: number;
+  y: number;
+}
+
 export interface Zone {
   id: string;
   name: string;
-  objectIds: string[];
+  color: string;
+  /** Resolved, cached object ids — see ZonesPlugin's definition/boundary/members model. */
+  members: string[];
+  /** 2D convex hull over all members' world bbox corners, in the X/Z plane. */
+  footprint: Point2D[];
+  /** World Y range (vertical) spanning all members' bboxes. */
+  zmin: number;
+  zmax: number;
 }
 
 /** Trustworthiness of a georeference — see CLAUDE.md "Georeferencing invariants". */
@@ -54,14 +71,29 @@ export type RotationSource = 'model_override' | 'site_inherited' | 'default';
 
 export type HeightDatum = 'ellipsoidal' | 'orthometric' | 'unknown';
 
+/** Which point of the model's local space `anchorLat`/`anchorLon` corresponds to. */
+export type AnchorConvention = 'model-origin' | 'model-centroid';
+
 export interface GeorefRecord {
-  latitude: number;
-  longitude: number;
-  height: number;
-  rotationDeg: number;
-  method: GeorefMethod;
-  rotationSource: RotationSource;
+  modelId: string;
+  siteId?: string;
+  anchorLat: number;
+  anchorLon: number;
+  height?: number;
   heightDatum: HeightDatum;
+  rotationDeg: number;
+  rotationSource: RotationSource;
+  method: GeorefMethod;
+  anchorConvention: AnchorConvention;
+}
+
+/** Engineering-properties record joined via the Linkage key (see CLAUDE.md invariant #3). */
+export interface ComponentRecord {
+  linkageKey: string;
+  moniker: string;
+  category: string;
+  tagNumber: string;
+  status: string;
 }
 
 export function createEmptyBoundingBox(): BoundingBox {
@@ -96,4 +128,161 @@ export function boundingBoxCenter(box: BoundingBox): Vector3Like {
     y: (box.min.y + box.max.y) / 2,
     z: (box.min.z + box.max.z) / 2,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 2D convex hull (Andrew's monotone chain) — used for Zone footprints.
+// ---------------------------------------------------------------------------
+
+function cross(o: Point2D, a: Point2D, b: Point2D): number {
+  return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+
+/**
+ * Returns the convex hull of `points` in counter-clockwise order, starting from the
+ * lowest-then-leftmost point, with no duplicate closing point. Collinear points on an edge
+ * are dropped. Degenerate inputs (0-2 distinct points) are returned deduplicated, as-is.
+ */
+export function computeConvexHull2D(points: readonly Point2D[]): Point2D[] {
+  const unique = Array.from(new Map(points.map((p) => [`${p.x}:${p.y}`, p])).values()).sort(
+    (a, b) => a.x - b.x || a.y - b.y,
+  );
+
+  if (unique.length <= 2) return unique;
+
+  const lower: Point2D[] = [];
+  for (const p of unique) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2]!, lower[lower.length - 1]!, p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  const upper: Point2D[] = [];
+  for (let i = unique.length - 1; i >= 0; i -= 1) {
+    const p = unique[i]!;
+    while (upper.length >= 2 && cross(upper[upper.length - 2]!, upper[upper.length - 1]!, p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/** Shoelace formula. Result is unsigned (always >= 0), regardless of winding order. */
+export function polygonArea(points: readonly Point2D[]): number {
+  if (points.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]!;
+    const b = points[(i + 1) % points.length]!;
+    sum += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(sum) / 2;
+}
+
+// ---------------------------------------------------------------------------
+// Local tangent-plane <-> lat/lon conversion, for MapGeorefPlugin.
+// ---------------------------------------------------------------------------
+
+export interface LatLon {
+  lat: number;
+  lon: number;
+}
+
+const EARTH_RADIUS_M = 6_378_137; // WGS84 semi-major axis
+const DEG_TO_RAD = Math.PI / 180;
+
+function metersPerDegreeLat(): number {
+  return DEG_TO_RAD * EARTH_RADIUS_M;
+}
+
+function metersPerDegreeLon(atLatDeg: number): number {
+  return DEG_TO_RAD * EARTH_RADIUS_M * Math.cos(atLatDeg * DEG_TO_RAD);
+}
+
+/**
+ * Projects a local-space 2D point (meters, X/Z plane) to lat/lon using a flat-earth local
+ * tangent-plane approximation centered on `anchor`, rotated by `rotationDeg` (degrees
+ * clockwise from north that the model's local +Y axis points). Good to sub-meter accuracy
+ * over plant-model-scale extents (up to a few km) — not a substitute for a real geodetic
+ * projection at larger scale.
+ */
+export function localToLatLon(local: Point2D, anchor: LatLon, rotationDeg: number): LatLon {
+  const theta = rotationDeg * DEG_TO_RAD;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  const east = local.x * cos + local.y * sin;
+  const north = -local.x * sin + local.y * cos;
+
+  return {
+    lat: anchor.lat + north / metersPerDegreeLat(),
+    lon: anchor.lon + east / metersPerDegreeLon(anchor.lat),
+  };
+}
+
+/** Exact inverse of {@link localToLatLon} for the same `anchor`/`rotationDeg`. */
+export function latLonToLocal(point: LatLon, anchor: LatLon, rotationDeg: number): Point2D {
+  const east = (point.lon - anchor.lon) * metersPerDegreeLon(anchor.lat);
+  const north = (point.lat - anchor.lat) * metersPerDegreeLat();
+  const theta = rotationDeg * DEG_TO_RAD;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+
+  return {
+    x: east * cos - north * sin,
+    y: east * sin + north * cos,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Trigram similarity — used by LinkageMetadataPlugin's fuzzy-match tier.
+// ---------------------------------------------------------------------------
+
+function trigrams(value: string): Set<string> {
+  const padded = `  ${value.toLowerCase()}  `;
+  const grams = new Set<string>();
+  for (let i = 0; i < padded.length - 2; i += 1) {
+    grams.add(padded.slice(i, i + 3));
+  }
+  return grams;
+}
+
+/** Dice coefficient over character trigrams (same idea as PostgreSQL's pg_trgm), in [0, 1]. */
+export function trigramSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  const gramsA = trigrams(a);
+  const gramsB = trigrams(b);
+  if (gramsA.size === 0 || gramsB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const gram of gramsA) {
+    if (gramsB.has(gram)) intersection += 1;
+  }
+  return (2 * intersection) / (gramsA.size + gramsB.size);
+}
+
+export interface TrigramMatch<T> {
+  candidate: T;
+  score: number;
+}
+
+/** Best-scoring candidate at or above `threshold`, or `null` if none qualifies. */
+export function findBestTrigramMatch<T>(
+  query: string,
+  candidates: readonly T[],
+  candidateText: (candidate: T) => string,
+  threshold = 0.3,
+): TrigramMatch<T> | null {
+  let best: TrigramMatch<T> | null = null;
+  for (const candidate of candidates) {
+    const score = trigramSimilarity(query, candidateText(candidate));
+    if (score >= threshold && (!best || score > best.score)) {
+      best = { candidate, score };
+    }
+  }
+  return best;
 }
