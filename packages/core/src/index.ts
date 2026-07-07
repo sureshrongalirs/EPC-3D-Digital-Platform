@@ -1,5 +1,30 @@
-// NOTE: this package's public API must never expose three.js types (see CLAUDE.md).
-// Plugins consume only the CoreSDK facade + PluginContext defined here.
-export function getCorePlaceholder(): string {
-  return 'PlantScope core placeholder';
-}
+// Public API surface of @plantscope/core. The underlying rendering engine is an internal
+// implementation detail and must never appear here — see CLAUDE.md invariant #1 and
+// internal/apiSurface.test.ts, which scans the built .d.ts to enforce this.
+export { Viewer } from './Viewer';
+export type { ViewerOptions } from './Viewer';
+export type {
+  EventBus,
+  PanelSlot,
+  PanelSpec,
+  PlantScopePlugin,
+  PluginContext,
+  PluginHooks,
+  RestClient,
+  ToolbarButtonSpec,
+  ToolbarSlot,
+} from './plugin';
+export type {
+  BoundingBox,
+  GeorefMethod,
+  GeorefRecord,
+  HeightDatum,
+  ModelInfo,
+  ObjectSummary,
+  PickResult,
+  RotationSource,
+  ScreenPoint,
+  TreeNode,
+  Vector3Like,
+  Zone,
+} from '@plantscope/shared';
