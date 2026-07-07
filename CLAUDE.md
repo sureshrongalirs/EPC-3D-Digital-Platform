@@ -91,9 +91,9 @@ sessions.
   Prettier, Vitest, CI, docker-compose skeleton.
 - **Phase 1 (complete):** `@plantscope/core` — CoreSDK facade, PluginContext, three.js
   viewer internals, OrbitControls, GLB loading, O(log n) picking, model tree, plugin host.
-- **Phase 2 (next):** first-party plugins (zones, map/georeference, linkage-metadata)
+- **Phase 2 (complete):** first-party plugins (zones, map/georeference, linkage-metadata)
   against the Phase 1 facade only.
-- **Phase 3 (not started):** API server + Postgres — catalog, upload, zones/georef/components
+- **Phase 3 (next):** API server + Postgres — catalog, upload, zones/georef/components
   endpoints, Range-enabled static serving, atomic publish transaction.
 - **Phase 4 (not started):** conversion worker — queue, assimp FBX→GLB, raw-binary FBX
   Properties70/Linkage parser, `.mdb2` join, atomic publish integration.
