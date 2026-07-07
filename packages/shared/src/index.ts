@@ -72,7 +72,7 @@ export type RotationSource = 'model_override' | 'site_inherited' | 'default';
 export type HeightDatum = 'ellipsoidal' | 'orthometric' | 'unknown';
 
 /** Which point of the model's local space `anchorLat`/`anchorLon` corresponds to. */
-export type AnchorConvention = 'model-origin' | 'model-centroid';
+export type AnchorConvention = 'model_origin' | 'model_centroid';
 
 export interface GeorefRecord {
   modelId: string;

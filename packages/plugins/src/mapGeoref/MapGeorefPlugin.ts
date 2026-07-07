@@ -43,7 +43,7 @@ function defaultAnchorState(): AnchorState {
     heightDatum: 'unknown',
     method: 'assumed',
     rotationSource: 'default',
-    anchorConvention: 'model-origin',
+    anchorConvention: 'model_origin',
   };
 }
 
