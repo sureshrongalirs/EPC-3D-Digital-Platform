@@ -10,6 +10,9 @@ export default tseslint.config(
       '**/node_modules/**',
       'deploy/data/**',
       'testdata/local/**',
+      // Vendored third-party assets (e.g. three.js's DRACO decoder, copied verbatim per
+      // CLAUDE.md's no-CDN-at-runtime invariant) — not our source, never linted.
+      '**/public/draco/**',
     ],
   },
   js.configs.recommended,
