@@ -28,7 +28,7 @@ interface AnchorState {
   lat: number;
   lon: number;
   rotationDeg: number;
-  height?: number;
+  height: number | null;
   heightDatum: HeightDatum;
   method: GeorefMethod;
   rotationSource: RotationSource;
@@ -40,6 +40,7 @@ function defaultAnchorState(): AnchorState {
     lat: DEFAULT_ANCHOR.lat,
     lon: DEFAULT_ANCHOR.lon,
     rotationDeg: 0,
+    height: null,
     heightDatum: 'unknown',
     method: 'assumed',
     rotationSource: 'default',
@@ -61,6 +62,7 @@ export class MapGeorefPlugin implements PlantScopePlugin {
 
   private ctx: PluginContext | null = null;
   private currentModel: ModelInfo | null = null;
+  private currentSiteId: string | null = null;
   private anchor: AnchorState = defaultAnchorState();
   private modelFootprint: Point2D[] = [];
 
@@ -69,6 +71,8 @@ export class MapGeorefPlugin implements PlantScopePlugin {
   private anchorMarker: L.CircleMarker | null = null;
   private badgeEl: HTMLElement | null = null;
   private rotationInput: HTMLInputElement | null = null;
+  private saveAsSiteDefaultButton: HTMLButtonElement | null = null;
+  private resetToSiteDefaultButton: HTMLButtonElement | null = null;
 
   readonly contributes: PlantScopePlugin['contributes'] = {
     panels: [
@@ -106,9 +110,18 @@ export class MapGeorefPlugin implements PlantScopePlugin {
     if (!this.ctx) return;
     this.modelFootprint = this.computeModelFootprint();
 
+    // ModelInfo (the facade's load result) doesn't carry site_id — fetch the catalog
+    // entry for it. Needed to gate "Save as site default" and resolve inheritance.
+    try {
+      const modelDto = await this.ctx.rest.get<{ siteId: string | null }>(`/api/models/${model.id}`);
+      this.currentSiteId = modelDto.siteId;
+    } catch {
+      this.currentSiteId = null;
+    }
+
     try {
       // Load an existing placement rather than forcing click-to-anchor from scratch.
-      const record = await this.ctx.rest.get<GeorefRecord>(`/api/georef/${model.id}`);
+      const record = await this.ctx.rest.get<GeorefRecord>(`/api/models/${model.id}/georef`);
       this.anchor = {
         lat: record.anchorLat,
         lon: record.anchorLon,
@@ -184,7 +197,25 @@ export class MapGeorefPlugin implements PlantScopePlugin {
     saveButton.textContent = 'Save georeference';
     saveButton.addEventListener('click', () => void this.save());
 
-    container.append(this.badgeEl, searchForm, mapEl, rotationLabel, saveButton);
+    this.saveAsSiteDefaultButton = document.createElement('button');
+    this.saveAsSiteDefaultButton.type = 'button';
+    this.saveAsSiteDefaultButton.textContent = 'Save as site default';
+    this.saveAsSiteDefaultButton.addEventListener('click', () => void this.saveAsSiteDefault());
+
+    this.resetToSiteDefaultButton = document.createElement('button');
+    this.resetToSiteDefaultButton.type = 'button';
+    this.resetToSiteDefaultButton.textContent = 'Reset to site default';
+    this.resetToSiteDefaultButton.addEventListener('click', () => void this.resetToSiteDefault());
+
+    container.append(
+      this.badgeEl,
+      searchForm,
+      mapEl,
+      rotationLabel,
+      saveButton,
+      this.saveAsSiteDefaultButton,
+      this.resetToSiteDefaultButton,
+    );
 
     const map = L.map(mapEl).setView([this.anchor.lat, this.anchor.lon], 17);
     this.map = map;
@@ -268,17 +299,36 @@ export class MapGeorefPlugin implements PlantScopePlugin {
     }).addTo(this.map);
   }
 
+  private rotationSourceLabel(): string {
+    switch (this.anchor.rotationSource) {
+      case 'model_override':
+        return 'Custom for this model';
+      case 'site_inherited':
+        return 'Site default';
+      case 'default':
+        return 'Not set';
+    }
+  }
+
   private updateBadge(): void {
     if (!this.badgeEl) return;
     const isUnrefinedDefault = this.anchor.method === 'assumed' && this.anchor.rotationSource === 'default';
-    const provenance = `method: ${this.anchor.method}, rotation: ${this.anchor.rotationSource}`;
-    this.badgeEl.textContent = isUnrefinedDefault ? `${DEFAULT_LABEL} (${provenance})` : provenance;
+    const label = `${this.rotationSourceLabel()} (method: ${this.anchor.method})`;
+    this.badgeEl.textContent = isUnrefinedDefault ? `${DEFAULT_LABEL} — ${label}` : label;
+
+    // "Save as site default" only makes sense for a model that belongs to a site.
+    if (this.saveAsSiteDefaultButton) this.saveAsSiteDefaultButton.hidden = !this.currentSiteId;
+    // "Reset to site default" only makes sense once there's an override to clear.
+    if (this.resetToSiteDefaultButton) {
+      this.resetToSiteDefaultButton.hidden = this.anchor.rotationSource !== 'model_override';
+    }
   }
 
-  private async save(): Promise<void> {
-    if (!this.ctx || !this.currentModel) return;
-    const record: GeorefRecord = {
+  private buildGeorefRecord(): GeorefRecord {
+    if (!this.currentModel) throw new Error('no model loaded');
+    return {
       modelId: this.currentModel.id,
+      siteId: this.currentSiteId,
       anchorLat: this.anchor.lat,
       anchorLon: this.anchor.lon,
       height: this.anchor.height,
@@ -288,7 +338,47 @@ export class MapGeorefPlugin implements PlantScopePlugin {
       method: this.anchor.method,
       anchorConvention: this.anchor.anchorConvention,
     };
-    await this.ctx.rest.post('/api/georef', record);
+  }
+
+  private async save(): Promise<void> {
+    if (!this.ctx || !this.currentModel) return;
+    const saved = await this.ctx.rest.post<GeorefRecord>(
+      `/api/models/${this.currentModel.id}/georef`,
+      this.buildGeorefRecord(),
+    );
+    this.anchor.rotationDeg = saved.rotationDeg;
+    this.anchor.rotationSource = saved.rotationSource;
+    this.refreshMap();
+  }
+
+  /**
+   * "Save as site default" (CLAUDE.md: propagation is only ever this one explicit
+   * action). Confirms with the user first — the PATCH itself is what tells us how many
+   * other models are affected, so that count is reported back as confirmation the write
+   * happened, not as a preview before it.
+   */
+  private async saveAsSiteDefault(): Promise<void> {
+    if (!this.ctx || !this.currentSiteId) return;
+    const confirmed = window.confirm(
+      `Save ${this.anchor.rotationDeg.toFixed(1)}° as this site's default rotation? ` +
+        'Other models at this site that are not individually overridden will switch to this value.',
+    );
+    if (!confirmed) return;
+
+    const result = await this.ctx.rest.patch<{ affectedModelsCount: number }>(`/api/sites/${this.currentSiteId}`, {
+      rotationDeg: this.anchor.rotationDeg,
+    });
+    window.alert(`Saved. ${result.affectedModelsCount} other model(s) now inherit this rotation.`);
+
+    if (this.currentModel) await this.handleModelLoaded(this.currentModel);
+  }
+
+  private async resetToSiteDefault(): Promise<void> {
+    if (!this.ctx || !this.currentModel) return;
+    const record = await this.ctx.rest.post<GeorefRecord>(`/api/models/${this.currentModel.id}/georef/reset`);
+    this.anchor.rotationDeg = record.rotationDeg;
+    this.anchor.rotationSource = record.rotationSource;
+    this.refreshMap();
   }
 }
 

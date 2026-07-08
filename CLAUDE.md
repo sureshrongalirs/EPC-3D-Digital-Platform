@@ -51,7 +51,10 @@ sign-off from the user — they encode hard-won constraints, not preferences.
   upload time, or via the interactive Map/Georeference plugin.
 - Rotation resolution precedence: (a) model-level override if set, (b) inherited from the
   model's site if the site has a saved rotation, (c) default 0° flagged for manual alignment.
-  Never silently guess a rotation.
+  Never silently guess a rotation. As of Phase 3, this precedence is resolved by whoever
+  WRITES a georef row, not by the reader, in one shared internal function
+  (`server/api/src/lib/rotationPrecedence.ts`'s `resolveRotation`) — the Phase 4 worker
+  must call this same function verbatim rather than reimplementing the precedence logic.
 - Sites are a first-class entity: `rotation_deg`, `anchor_convention`, `height_datum` are
   site-level defaults; individual models can override without mutating the site. Propagating
   a model's rotation up to its site is an explicit user action ("save as site default"), never
@@ -93,9 +96,9 @@ sessions.
   viewer internals, OrbitControls, GLB loading, O(log n) picking, model tree, plugin host.
 - **Phase 2 (complete):** first-party plugins (zones, map/georeference, linkage-metadata)
   against the Phase 1 facade only.
-- **Phase 3 (next):** API server + Postgres — catalog, upload, zones/georef/components
+- **Phase 3 (complete):** API server + Postgres — catalog, upload, zones/georef/components
   endpoints, Range-enabled static serving, atomic publish transaction.
-- **Phase 4 (not started):** conversion worker — queue, assimp FBX→GLB, raw-binary FBX
+- **Phase 4 (next):** conversion worker — queue, assimp FBX→GLB, raw-binary FBX
   Properties70/Linkage parser, `.mdb2` join, atomic publish integration.
 - **Phase 5 (not started):** OGC 3D Tiles path — worker tiling step, 3DTilesRendererJS in the
   SDK, size-routed streaming for large models.

@@ -25,16 +25,22 @@ services:
     build:
       context: ../server/api
       dockerfile: Dockerfile
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: postgres://${POSTGRES_USER:-plantscope}:${POSTGRES_PASSWORD:-plantscope_dev}@postgres:5432/${POSTGRES_DB:-plantscope}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-1024}
+      PORT: 3000
+    # Read-write: uploads land under /data/models/raw, published artifacts under
+    # /data/models/artifacts (CLAUDE.md invariant #5 — DB stores only pointers to these).
     volumes:
-      - ./data/models:/data/models:ro
+      - ./data:/data
     networks:
       - backend
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      # Placeholder — replace with a real /health check once the API exists (Phase 1+).
-      test: ['CMD-SHELL', 'exit 0']
+      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3000/healthz || exit 1']
       interval: 30s
       timeout: 5s
       retries: 5
@@ -63,6 +69,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-plantscope}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plantscope_dev}
       POSTGRES_DB: ${POSTGRES_DB:-plantscope}
+    # Published so `pnpm --filter @plantscope/api dev` (running on the host, not in
+    # compose) can reach it during local development — see the manual verification script
+    # in the Phase 3 PR description. `backend` stays internal: true regardless; publishing
+    # a port is host<->container plumbing, not outbound egress from the container.
+    ports:
+      - '5432:5432'
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
