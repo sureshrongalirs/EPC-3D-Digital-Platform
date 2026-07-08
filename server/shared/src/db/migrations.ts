@@ -118,6 +118,21 @@ const migrations: Migration[] = [
       });
     },
   },
+  {
+    id: '002_worker_queue_columns',
+    up: async (knex) => {
+      // processing_started_at: set when a worker claims a queued row, cleared on
+      // completion/failure -- lets the queue detect a row stuck in 'processing' past
+      // WORKER_STALL_TIMEOUT_MS (a crashed worker) and return it to 'queued'.
+      // warnings: structured, non-fatal job warnings (e.g. "orientation defaulted", "join
+      // coverage below 90%") surfaced by GET /api/models/{id}'s conversion dashboard --
+      // distinct from `error`, which is set only on a hard job failure.
+      await knex.schema.alterTable('models', (table) => {
+        table.timestamp('processing_started_at').nullable();
+        table.text('warnings').nullable();
+      });
+    },
+  },
 ];
 
 export async function runMigrations(db: Database): Promise<void> {

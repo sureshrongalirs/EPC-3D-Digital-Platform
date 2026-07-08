@@ -12,6 +12,15 @@
     "test": "vitest run",
     "lint": "eslint ."
   },
+  "dependencies": {
+    "@gltf-transform/core": "^4.4.1",
+    "@gltf-transform/extensions": "^4.4.1",
+    "@gltf-transform/functions": "^4.4.1",
+    "@plantscope/server-shared": "workspace:*",
+    "dotenv": "^17.4.2",
+    "draco3dgltf": "^1.5.7",
+    "pino": "^10.3.1"
+  },
   "devDependencies": {
     "tsx": "^4.23.0"
   }
