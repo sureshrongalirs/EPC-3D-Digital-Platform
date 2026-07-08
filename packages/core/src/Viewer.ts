@@ -9,7 +9,7 @@ import type {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 
 import { createPanelSlot, createToolbarSlot } from './internal/domSlots';
 import { EventBusImpl } from './internal/eventBus';
@@ -46,6 +46,23 @@ function generateId(): string {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
+}
+
+const GLB_MAGIC = [0x67, 0x6c, 0x54, 0x46]; // "glTF" — binary container's magic header
+
+/**
+ * A `.glb` is self-contained (magic header + embedded buffers/textures); a `.gltf` is JSON
+ * text, optionally referencing external `.bin`/texture files. CLAUDE.md invariant #4: both
+ * are handled by GLTFLoader, .fbx never is (worker-only, Phase 4).
+ */
+function detectFormatFromBuffer(buffer: ArrayBuffer): 'glb' | 'gltf' {
+  const header = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+  const isGlb = GLB_MAGIC.every((byte, i) => header[i] === byte);
+  return isGlb ? 'glb' : 'gltf';
+}
+
+function detectFormatFromUrl(url: string): 'glb' | 'gltf' {
+  return url.toLowerCase().endsWith('.gltf') ? 'gltf' : 'glb';
 }
 
 function toSharedBoundingBox(box: THREE.Box3): BoundingBox {
@@ -141,30 +158,35 @@ export class Viewer {
   async loadModel(source: string | ArrayBuffer | ModelInfo): Promise<ModelInfo> {
     this.unloadModel();
 
-    let arrayBuffer: ArrayBuffer;
+    let gltf: GLTF;
     let id: string;
     let name: string;
+    let format: 'glb' | 'gltf';
 
     if (typeof source === 'string') {
-      const res = await fetch(source);
-      if (!res.ok) throw new Error(`Failed to fetch model "${source}": ${res.status}`);
-      arrayBuffer = await res.arrayBuffer();
+      // loadAsync (not a manual fetch+parseAsync) resolves a .gltf JSON's relative external
+      // resources (a sibling .bin, textures) against this URL itself — this is what makes
+      // .gltf, not just self-contained .glb, work. See CLAUDE.md's note near invariant #4.
+      gltf = await this.gltfLoader.loadAsync(source);
       id = generateId();
       name = source.split('/').pop() || 'model';
+      format = detectFormatFromUrl(source);
     } else if (source instanceof ArrayBuffer) {
-      arrayBuffer = source;
+      // Raw bytes with no URL context — fine for a self-contained .glb, or a .gltf JSON
+      // with only embedded (data-URI) resources. A .gltf referencing a separate sibling
+      // .bin/texture file can't be resolved from bytes alone (nothing to resolve against).
+      gltf = await this.gltfLoader.parseAsync(source, '');
       id = generateId();
       name = 'model';
+      format = detectFormatFromBuffer(source);
     } else {
       const url = `${this.apiBaseUrl}/models/${source.id}/binary`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Failed to fetch model "${source.id}": ${res.status}`);
-      arrayBuffer = await res.arrayBuffer();
+      gltf = await this.gltfLoader.loadAsync(url);
       id = source.id;
       name = source.name;
+      format = detectFormatFromUrl(url);
     }
 
-    const gltf = await this.gltfLoader.parseAsync(arrayBuffer, '');
     this.modelGroup = gltf.scene;
     this.scene.add(this.modelGroup);
 
@@ -181,7 +203,7 @@ export class Viewer {
     const modelInfo: ModelInfo = {
       id,
       name,
-      format: 'glb',
+      format,
       objectCount: this.objectRecords.size,
       bbox: toSharedBoundingBox(bbox),
     };

@@ -35,7 +35,8 @@ export interface PickResult {
 export interface ModelInfo {
   id: string;
   name: string;
-  format: 'glb';
+  /** Both are handled by the same GLTFLoader-based code path — see CLAUDE.md invariant #4. */
+  format: 'glb' | 'gltf';
   objectCount: number;
   bbox: BoundingBox;
 }
