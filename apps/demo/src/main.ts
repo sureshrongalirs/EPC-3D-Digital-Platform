@@ -1,8 +1,15 @@
 import type { PickResult } from '@plantscope/core';
 import { Viewer } from '@plantscope/core';
-import { createLinkageMetadataPlugin, createMapGeorefPlugin, createMockRestClient, createZonesPlugin } from '@plantscope/plugins';
+import { createLinkageMetadataPlugin, createMapGeorefPlugin, createZonesPlugin } from '@plantscope/plugins';
 
-import { linkageKeyByNodeName, mockComponents, mockLabelIndex } from './mockData';
+import { linkageKeyByNodeName, mockLabelIndex } from './mockData';
+
+interface ModelSummary {
+  id: string;
+  name: string;
+  status: 'queued' | 'processing' | 'ready' | 'failed';
+  artifactUrl: string | null;
+}
 
 function required<T extends Element>(selector: string): T {
   const el = document.querySelector<T>(selector);
@@ -22,11 +29,10 @@ function appendLog(message: string): void {
   log.textContent = `${time}  ${message}\n${log.textContent ?? ''}`;
 }
 
-// No real API server exists until Phase 3 — this in-memory mock stands in behind the same
-// RestClient interface every plugin uses via PluginContext.rest.
-const mockRestClient = createMockRestClient({ components: mockComponents });
-
-const viewer = new Viewer(viewerContainer, { restClient: mockRestClient });
+// Phase 3: talks to the real server/api over relative paths (see vite.config.ts's dev
+// proxy) — no more in-memory mock RestClient. mockComponents/mockLabelIndex stay for
+// LinkageMetadataPlugin's fuzzy-match tier only (the API doesn't do label search itself).
+const viewer = new Viewer(viewerContainer, {});
 
 viewer.use(createZonesPlugin());
 viewer.use(createMapGeorefPlugin());
@@ -36,6 +42,23 @@ viewer.use(
     labelIndex: mockLabelIndex,
   }),
 );
+
+async function loadNewestReadyModel(): Promise<void> {
+  try {
+    const models = (await (await fetch('/api/models')).json()) as ModelSummary[];
+    const newestReady = models.find((m) => m.status === 'ready' && m.artifactUrl);
+    if (!newestReady?.artifactUrl) {
+      appendLog('no ready model in the catalog yet — upload one below.');
+      return;
+    }
+    appendLog(`auto-loading newest ready model "${newestReady.name}"...`);
+    const modelInfo = await viewer.loadModel(newestReady.artifactUrl);
+    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
+  } catch (err) {
+    appendLog(`failed to reach the API: ${(err as Error).message}`);
+  }
+}
+void loadNewestReadyModel();
 
 let lastPickedId: string | null = null;
 
