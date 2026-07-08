@@ -1,5 +1,5 @@
 import type { PlantScopePlugin, PluginContext } from '@plantscope/core';
-import type { ComponentRecord, PickResult, TreeNode } from '@plantscope/shared';
+import type { ComponentRecord, ModelInfo, PickResult, TreeNode } from '@plantscope/shared';
 
 import { resolveLinkage, type LinkageLookupOptions, type LinkageLookupResult } from './resolveLinkage';
 
@@ -14,6 +14,7 @@ export class LinkageMetadataPlugin implements PlantScopePlugin {
 
   private ctx: PluginContext | null = null;
   private nodeNameById = new Map<string, string>();
+  private currentModel: ModelInfo | null = null;
   private panelEl: HTMLElement | null = null;
 
   constructor(private readonly options: LinkageLookupOptions) {}
@@ -32,7 +33,8 @@ export class LinkageMetadataPlugin implements PlantScopePlugin {
   };
 
   readonly hooks: PlantScopePlugin['hooks'] = {
-    onModelLoaded: () => {
+    onModelLoaded: (model) => {
+      this.currentModel = model;
       this.nodeNameById = this.buildNameIndex();
       this.renderPrompt();
     },
@@ -61,11 +63,13 @@ export class LinkageMetadataPlugin implements PlantScopePlugin {
     if (!this.ctx) return;
     const nodeName = this.nodeNameById.get(result.objectId) ?? result.objectId;
     const bounds = this.ctx.viewer.getObjectBounds(result.objectId);
+    const modelId = this.currentModel?.id;
 
     const lookup = await resolveLinkage(
       nodeName,
       this.options,
-      (linkageKey) => this.ctx!.rest.get<ComponentRecord>(`/api/components/${linkageKey}`),
+      (linkageKey) =>
+        this.ctx!.rest.get<ComponentRecord>(`/api/components/${linkageKey}?model=${encodeURIComponent(modelId ?? '')}`),
       bounds,
     );
 

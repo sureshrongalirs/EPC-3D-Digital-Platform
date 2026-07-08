@@ -1,5 +1,5 @@
 import type { PlantScopePlugin, PluginContext } from '@plantscope/core';
-import type { BoundingBox, Zone } from '@plantscope/shared';
+import type { BoundingBox, ModelInfo, Zone } from '@plantscope/shared';
 
 import { selectObjectsInRect, type ScreenRect } from './boxSelect';
 import { computeZoneBoundary } from './zoneBoundary';
@@ -34,6 +34,7 @@ export class ZonesPlugin implements PlantScopePlugin {
   readonly version = '0.1.0';
 
   private ctx: PluginContext | null = null;
+  private currentModel: ModelInfo | null = null;
   private zones = new Map<string, Zone>();
   private changeListeners = new Set<() => void>();
 
@@ -51,6 +52,14 @@ export class ZonesPlugin implements PlantScopePlugin {
     ],
   };
 
+  readonly hooks: PlantScopePlugin['hooks'] = {
+    onModelLoaded: (model) => {
+      this.currentModel = model;
+      this.zones.clear();
+      void this.loadZones();
+    },
+  };
+
   onInstall(): void {
     // No setup needed against the raw Viewer beyond what onActivate's ctx provides.
   }
@@ -58,7 +67,6 @@ export class ZonesPlugin implements PlantScopePlugin {
   onActivate(ctx: PluginContext): void {
     this.ctx = ctx;
     ctx.ui.viewportElement.addEventListener('pointerdown', this.handlePointerDown);
-    void this.loadZones();
   }
 
   onDeactivate(): void {
@@ -103,9 +111,9 @@ export class ZonesPlugin implements PlantScopePlugin {
   }
 
   private async loadZones(): Promise<void> {
-    if (!this.ctx) return;
+    if (!this.ctx || !this.currentModel) return;
     try {
-      const zones = await this.ctx.rest.get<Zone[]>('/api/zones');
+      const zones = await this.ctx.rest.get<Zone[]>(`/api/zones?model=${encodeURIComponent(this.currentModel.id)}`);
       for (const zone of zones) this.zones.set(zone.id, zone);
       this.notifyChange();
     } catch {
@@ -179,7 +187,7 @@ export class ZonesPlugin implements PlantScopePlugin {
   private async commitCapture(capturedIds: string[]): Promise<void> {
     const pending = this.pendingCapture;
     this.pendingCapture = null;
-    if (!this.ctx || !pending) return;
+    if (!this.ctx || !pending || !this.currentModel) return;
 
     const existing = pending.appendToZoneId ? this.zones.get(pending.appendToZoneId) : undefined;
     const members = Array.from(new Set([...(existing?.members ?? []), ...capturedIds]));
@@ -195,10 +203,18 @@ export class ZonesPlugin implements PlantScopePlugin {
       zmax: boundary.zmax,
     };
 
-    const saved = await this.ctx.rest.post<Zone>('/api/zones', zone);
-    this.zones.set(saved.id, saved);
+    const saved = await this.postZone(zone);
+    if (!saved) return;
     this.ctx.events.emit('zoneCreated', saved);
     this.notifyChange();
+  }
+
+  /** Every POST /api/zones call needs modelId — the persisted Zone shape doesn't carry one. */
+  private async postZone(zone: Zone): Promise<Zone | null> {
+    if (!this.ctx || !this.currentModel) return null;
+    const saved = await this.ctx.rest.post<Zone>('/api/zones', { ...zone, modelId: this.currentModel.id });
+    this.zones.set(saved.id, saved);
+    return saved;
   }
 
   private computeBoundary(memberIds: string[]) {
@@ -224,9 +240,7 @@ export class ZonesPlugin implements PlantScopePlugin {
   }
 
   private async persistZoneUpdate(zone: Zone): Promise<Zone | null> {
-    if (!this.ctx) return null;
-    const saved = await this.ctx.rest.post<Zone>('/api/zones', zone);
-    this.zones.set(saved.id, saved);
+    const saved = await this.postZone(zone);
     this.notifyChange();
     return saved;
   }
