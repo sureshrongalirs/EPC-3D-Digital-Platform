@@ -76,10 +76,10 @@ export type AnchorConvention = 'model_origin' | 'model_centroid';
 
 export interface GeorefRecord {
   modelId: string;
-  siteId?: string;
+  siteId: string | null;
   anchorLat: number;
   anchorLon: number;
-  height?: number;
+  height: number | null;
   heightDatum: HeightDatum;
   rotationDeg: number;
   rotationSource: RotationSource;
