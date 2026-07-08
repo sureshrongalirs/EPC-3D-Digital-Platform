@@ -12,13 +12,21 @@ export class RestClientImpl implements RestClient {
   }
 
   async post<T>(path: string, body?: unknown): Promise<T> {
+    return this.send<T>('POST', path, body);
+  }
+
+  async patch<T>(path: string, body?: unknown): Promise<T> {
+    return this.send<T>('PATCH', path, body);
+  }
+
+  private async send<T>(method: 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
-      throw new Error(`POST ${path} failed: ${res.status}`);
+      throw new Error(`${method} ${path} failed: ${res.status}`);
     }
     return (await res.json()) as T;
   }

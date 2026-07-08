@@ -10,7 +10,7 @@ import { PluginHost } from './pluginHost';
 
 function createHost() {
   const fakeViewer = {} as Viewer;
-  const rest: RestClient = { get: vi.fn(), post: vi.fn() };
+  const rest: RestClient = { get: vi.fn(), post: vi.fn(), patch: vi.fn() };
   const events = new EventBusImpl();
   const toolbar: ToolbarSlot = { addButton: vi.fn(), removeButton: vi.fn() };
   const panel: PanelSlot = { addPanel: vi.fn(), removePanel: vi.fn() };
