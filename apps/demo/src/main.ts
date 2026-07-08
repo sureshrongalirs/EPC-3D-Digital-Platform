@@ -24,6 +24,7 @@ const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
 const showAllBtn = required<HTMLButtonElement>('#show-all-btn');
 const uploadBtn = required<HTMLButtonElement>('#upload-btn');
 const uploadInput = required<HTMLInputElement>('#upload-input');
+const uploadCancelBtn = required<HTMLButtonElement>('#upload-cancel-btn');
 const log = required<HTMLPreElement>('#log');
 
 function appendLog(message: string): void {
@@ -122,7 +123,7 @@ interface ModelRecord {
 }
 
 const POLL_INTERVAL_MS = 1500;
-const POLL_TIMEOUT_MS = 2 * 60 * 1000;
+const STILL_GOING_LOG_INTERVAL_MS = 15 * 1000;
 
 async function describeError(res: Response): Promise<string> {
   try {
@@ -133,11 +134,40 @@ async function describeError(res: Response): Promise<string> {
   }
 }
 
-async function pollUntilDone(modelId: string): Promise<void> {
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+/** Cancellation is a deliberate user action (the Cancel button below), not an assumption
+ * baked into the poll itself — real conversions (e.g. a large FBX through assimp + Draco)
+ * can legitimately take several minutes, so there is no timeout duration that's both safe
+ * to give up at and short enough to be a useful default. A worker that's genuinely stuck is
+ * better diagnosed by looking at its own logs than by the browser silently abandoning the
+ * poll. */
+interface PollCancelToken {
+  cancelled: boolean;
+}
+
+let currentPollToken: PollCancelToken | null = null;
+
+function setPolling(active: boolean): void {
+  uploadCancelBtn.disabled = !active;
+}
+
+async function pollUntilDone(modelId: string, token: PollCancelToken): Promise<void> {
   const startedAt = Date.now();
   let lastStatus: string | null = null;
+  let lastElapsedLogMs = 0;
 
-  while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
+  for (;;) {
+    if (token.cancelled) {
+      appendLog(`upload ${modelId}: cancelled by user after ${formatElapsed(Date.now() - startedAt)} — the job keeps running on the server.`);
+      return;
+    }
+
     const res = await fetch(`/api/models/${modelId}`);
     if (!res.ok) {
       appendLog(`upload ${modelId}: GET /api/models/${modelId} failed (${await describeError(res)})`);
@@ -164,10 +194,16 @@ async function pollUntilDone(modelId: string): Promise<void> {
       return;
     }
 
+    // Still queued/processing — a periodic heartbeat so it's clear the poll itself hasn't
+    // hung, separate from (and possibly on the same tick as) a status-transition log above.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs - lastElapsedLogMs >= STILL_GOING_LOG_INTERVAL_MS) {
+      appendLog(`upload ${modelId}: still ${record.status}... (${formatElapsed(elapsedMs)} elapsed)`);
+      lastElapsedLogMs = elapsedMs;
+    }
+
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-
-  appendLog(`upload ${modelId}: still processing after ${POLL_TIMEOUT_MS / 1000}s — timed out waiting. Check the catalog later.`);
 }
 
 async function uploadToServer(file: File): Promise<void> {
@@ -182,9 +218,16 @@ async function uploadToServer(file: File): Promise<void> {
     }
     const record = (await res.json()) as ModelRecord;
     appendLog(`upload ${file.name}: created model ${record.id}, status=${record.status}`);
-    await pollUntilDone(record.id);
+
+    const token: PollCancelToken = { cancelled: false };
+    currentPollToken = token;
+    setPolling(true);
+    await pollUntilDone(record.id, token);
   } catch (err) {
     appendLog(`upload ${file.name} failed: ${(err as Error).message}`);
+  } finally {
+    currentPollToken = null;
+    setPolling(false);
   }
 }
 
@@ -193,4 +236,7 @@ uploadInput.addEventListener('change', () => {
   const file = uploadInput.files?.[0];
   if (file) void uploadToServer(file);
   uploadInput.value = ''; // allow re-selecting the same file name in a row
+});
+uploadCancelBtn.addEventListener('click', () => {
+  if (currentPollToken) currentPollToken.cancelled = true;
 });
