@@ -29,7 +29,10 @@ sign-off from the user — they encode hard-won constraints, not preferences.
    hold for real-world large files: FBX sources have been seen at 200MB+, requiring worker
    conversion parallelism to drop to 1 for large jobs (memory-bound, not CPU-bound); `.mdb2`
    sources have been seen at 800MB+, requiring streamed export and batched `COPY` inserts
-   rather than buffering full tables in memory.
+   rather than buffering full tables in memory. `@plantscope/core`'s `loadModel` supports
+   `.glb` and `.gltf` directly (both handled by `GLTFLoader`); `.fbx` is never parsed
+   client-side — it is only ever ingested via the Phase 4 worker's server-side conversion,
+   which recovers Linkage keys and produces a `.glb`/tiles artifact for the browser to load.
 
 5. **Binaries live on the filesystem under `/data/models`.** The database stores only pointers
    and metadata — never blobs.
