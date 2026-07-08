@@ -14,3 +14,6 @@ npm-debug.log*
 
 # docker-compose bind-mount data (postgres data dir, converted models)
 deploy/data/
+
+# server/api's local dev DATA_DIR default (SQLite file + uploaded models) — see .env.example
+server/api/data/
