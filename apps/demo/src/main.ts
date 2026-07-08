@@ -22,6 +22,8 @@ const fileInput = required<HTMLInputElement>('#file-input');
 const fitBtn = required<HTMLButtonElement>('#fit-btn');
 const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
 const showAllBtn = required<HTMLButtonElement>('#show-all-btn');
+const uploadBtn = required<HTMLButtonElement>('#upload-btn');
+const uploadInput = required<HTMLInputElement>('#upload-input');
 const log = required<HTMLPreElement>('#log');
 
 function appendLog(message: string): void {
@@ -104,3 +106,91 @@ isolateBtn.addEventListener('click', () => {
   if (lastPickedId) viewer.isolate([lastPickedId]);
 });
 showAllBtn.addEventListener('click', () => viewer.showAll());
+
+// --- Upload to server: distinct from the local-preview file-input/drag-drop above, which
+// loads bytes directly via viewer.loadModel(ArrayBuffer) and never touches the API. This
+// path POSTs to /api/models, then polls GET /api/models/{id} until the Phase 4 worker (or,
+// for an uploaded .glb, the API's own immediate self-publish) finishes conversion, and only
+// then loads the real published artifact via viewer.loadModel({ id, name }).
+
+interface ModelRecord {
+  id: string;
+  name: string;
+  status: 'queued' | 'processing' | 'ready' | 'failed';
+  artifactUrl: string | null;
+  error: string | null;
+}
+
+const POLL_INTERVAL_MS = 1500;
+const POLL_TIMEOUT_MS = 2 * 60 * 1000;
+
+async function describeError(res: Response): Promise<string> {
+  try {
+    const problem = (await res.json()) as { detail?: string; title?: string };
+    return problem.detail ?? problem.title ?? `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+async function pollUntilDone(modelId: string): Promise<void> {
+  const startedAt = Date.now();
+  let lastStatus: string | null = null;
+
+  while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
+    const res = await fetch(`/api/models/${modelId}`);
+    if (!res.ok) {
+      appendLog(`upload ${modelId}: GET /api/models/${modelId} failed (${await describeError(res)})`);
+      return;
+    }
+    const record = (await res.json()) as ModelRecord;
+
+    if (record.status !== lastStatus) {
+      appendLog(`upload ${modelId}: status -> ${record.status}`);
+      lastStatus = record.status;
+    }
+
+    if (record.status === 'ready') {
+      try {
+        const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
+        appendLog(`upload ${modelId}: loaded "${modelInfo.name}" — ${modelInfo.objectCount} objects`);
+      } catch (err) {
+        appendLog(`upload ${modelId}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+    if (record.status === 'failed') {
+      appendLog(`upload ${modelId}: FAILED — ${record.error ?? 'unknown error'}`);
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+
+  appendLog(`upload ${modelId}: still processing after ${POLL_TIMEOUT_MS / 1000}s — timed out waiting. Check the catalog later.`);
+}
+
+async function uploadToServer(file: File): Promise<void> {
+  appendLog(`uploading ${file.name} to server (POST /api/models)...`);
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/models', { method: 'POST', body: formData });
+    if (!res.ok) {
+      appendLog(`upload ${file.name} failed: ${await describeError(res)}`);
+      return;
+    }
+    const record = (await res.json()) as ModelRecord;
+    appendLog(`upload ${file.name}: created model ${record.id}, status=${record.status}`);
+    await pollUntilDone(record.id);
+  } catch (err) {
+    appendLog(`upload ${file.name} failed: ${(err as Error).message}`);
+  }
+}
+
+uploadBtn.addEventListener('click', () => uploadInput.click());
+uploadInput.addEventListener('change', () => {
+  const file = uploadInput.files?.[0];
+  if (file) void uploadToServer(file);
+  uploadInput.value = ''; // allow re-selecting the same file name in a row
+});

@@ -2,7 +2,7 @@
 // implementation detail and must never appear here — see CLAUDE.md invariant #1 and
 // internal/apiSurface.test.ts, which scans the built .d.ts to enforce this.
 export { Viewer } from './Viewer';
-export type { ViewerOptions } from './Viewer';
+export type { ModelPointer, ViewerOptions } from './Viewer';
 export type {
   EventBus,
   PanelSlot,

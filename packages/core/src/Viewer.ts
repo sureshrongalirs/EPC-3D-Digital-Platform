@@ -65,6 +65,25 @@ function detectFormatFromUrl(url: string): 'glb' | 'gltf' {
   return url.toLowerCase().endsWith('.gltf') ? 'gltf' : 'glb';
 }
 
+/** Minimal shape returned by GET /api/models/{id} that loadModel's server-pointer branch
+ * actually needs -- narrower than the full ModelDto so callers don't have to fetch it
+ * themselves first. */
+interface ModelRecordResponse {
+  name: string;
+  status: 'queued' | 'processing' | 'ready' | 'failed';
+  artifactUrl: string | null;
+  error: string | null;
+}
+
+/** Third loadModel() input form: "load whatever the server currently has published for
+ * this catalog id" (as opposed to a raw URL or in-memory bytes). Deliberately not the full
+ * ModelInfo output type -- format/objectCount/bbox are recomputed from the loaded scene,
+ * never supplied by the caller. */
+export interface ModelPointer {
+  id: string;
+  name?: string;
+}
+
 function toSharedBoundingBox(box: THREE.Box3): BoundingBox {
   return {
     min: { x: box.min.x, y: box.min.y, z: box.min.z },
@@ -155,7 +174,7 @@ export class Viewer {
     this.animate();
   }
 
-  async loadModel(source: string | ArrayBuffer | ModelInfo): Promise<ModelInfo> {
+  async loadModel(source: string | ArrayBuffer | ModelPointer): Promise<ModelInfo> {
     this.unloadModel();
 
     let gltf: GLTF;
@@ -180,11 +199,27 @@ export class Viewer {
       name = 'model';
       format = detectFormatFromBuffer(source);
     } else {
-      const url = `${this.apiBaseUrl}/models/${source.id}/binary`;
-      gltf = await this.gltfLoader.loadAsync(url);
+      // Server-pointer form: look up the catalog record for its artifactUrl rather than
+      // assuming a binary-fetch route — server/api serves the actual bytes via the
+      // Range-enabled /files/* static route, pointed to by ModelDto.artifactUrl.
+      const infoUrl = `${this.apiBaseUrl}/api/models/${source.id}`;
+      const infoRes = await fetch(infoUrl);
+      if (!infoRes.ok) {
+        throw new Error(`GET ${infoUrl} failed: ${infoRes.status}`);
+      }
+      const record = (await infoRes.json()) as ModelRecordResponse;
+      if (record.status === 'failed') {
+        throw new Error(`model ${source.id} failed conversion: ${record.error ?? 'unknown error'}`);
+      }
+      if (!record.artifactUrl) {
+        throw new Error(`model ${source.id} has no published artifact yet (status: ${record.status})`);
+      }
+
+      const artifactUrl = `${this.apiBaseUrl}${record.artifactUrl}`;
+      gltf = await this.gltfLoader.loadAsync(artifactUrl);
       id = source.id;
-      name = source.name;
-      format = detectFormatFromUrl(url);
+      name = source.name ?? record.name;
+      format = detectFormatFromUrl(artifactUrl);
     }
 
     this.modelGroup = gltf.scene;
