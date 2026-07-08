@@ -22,6 +22,9 @@ const fileInput = required<HTMLInputElement>('#file-input');
 const fitBtn = required<HTMLButtonElement>('#fit-btn');
 const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
 const showAllBtn = required<HTMLButtonElement>('#show-all-btn');
+const uploadBtn = required<HTMLButtonElement>('#upload-btn');
+const uploadInput = required<HTMLInputElement>('#upload-input');
+const uploadCancelBtn = required<HTMLButtonElement>('#upload-cancel-btn');
 const log = required<HTMLPreElement>('#log');
 
 function appendLog(message: string): void {
@@ -104,3 +107,180 @@ isolateBtn.addEventListener('click', () => {
   if (lastPickedId) viewer.isolate([lastPickedId]);
 });
 showAllBtn.addEventListener('click', () => viewer.showAll());
+
+// --- Upload to server: distinct from the local-preview file-input/drag-drop above, which
+// loads bytes directly via viewer.loadModel(ArrayBuffer) and never touches the API. This
+// path POSTs to /api/models (single file) or /api/models/batch (multiple files, field
+// "files" repeated -- distinct filenames become distinct models per that endpoint's own
+// basename-grouping contract), then polls GET /api/models/{id} per created model until the
+// Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish) finishes
+// conversion, and only then loads the real published artifact via
+// viewer.loadModel({ id, name }). Multiple models poll concurrently, independently.
+
+interface ModelRecord {
+  id: string;
+  name: string;
+  status: 'queued' | 'processing' | 'ready' | 'failed';
+  artifactUrl: string | null;
+  error: string | null;
+}
+
+const POLL_INTERVAL_MS = 1500;
+const STILL_GOING_LOG_INTERVAL_MS = 15 * 1000;
+
+async function describeError(res: Response): Promise<string> {
+  try {
+    const problem = (await res.json()) as { detail?: string; title?: string };
+    return problem.detail ?? problem.title ?? `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+/** Cancellation is a deliberate user action (the "Cancel all in-flight uploads" button
+ * below), not an assumption baked into the poll itself — real conversions (e.g. a large FBX
+ * through assimp + Draco) can legitimately take several minutes, so there is no timeout
+ * duration that's both safe to give up at and short enough to be a useful default. A worker
+ * that's genuinely stuck is better diagnosed by looking at its own logs than by the browser
+ * silently abandoning the poll. */
+interface PollCancelToken {
+  cancelled: boolean;
+}
+
+// One entry per in-flight poll, keyed by model id — lets multiple uploads (from a single
+// batch selection, or several separate uploads in a row) run concurrently, each independently
+// cancellable, and lets "Cancel all in-flight uploads" reach every one of them at once. A
+// per-row cancel button (cancelling just one upload) would be a nice follow-up but isn't
+// implemented here — this pass only adds an all-or-nothing cancel.
+const activePolls = new Map<string, PollCancelToken>();
+
+function updateCancelButtonState(): void {
+  uploadCancelBtn.disabled = activePolls.size === 0;
+}
+
+async function pollUntilDone(modelId: string, token: PollCancelToken, label: string = modelId): Promise<void> {
+  const startedAt = Date.now();
+  let lastStatus: string | null = null;
+  let lastElapsedLogMs = 0;
+
+  for (;;) {
+    if (token.cancelled) {
+      appendLog(`upload ${label}: cancelled by user after ${formatElapsed(Date.now() - startedAt)} — the job keeps running on the server.`);
+      return;
+    }
+
+    const res = await fetch(`/api/models/${modelId}`);
+    if (!res.ok) {
+      appendLog(`upload ${label}: GET /api/models/${modelId} failed (${await describeError(res)})`);
+      return;
+    }
+    const record = (await res.json()) as ModelRecord;
+
+    if (record.status !== lastStatus) {
+      appendLog(`upload ${label}: status -> ${record.status}`);
+      lastStatus = record.status;
+    }
+
+    if (record.status === 'ready') {
+      try {
+        const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
+        appendLog(`upload ${label}: loaded "${modelInfo.name}" — ${modelInfo.objectCount} objects`);
+      } catch (err) {
+        appendLog(`upload ${label}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+    if (record.status === 'failed') {
+      appendLog(`upload ${label}: FAILED — ${record.error ?? 'unknown error'}`);
+      return;
+    }
+
+    // Still queued/processing — a periodic heartbeat so it's clear the poll itself hasn't
+    // hung, separate from (and possibly on the same tick as) a status-transition log above.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs - lastElapsedLogMs >= STILL_GOING_LOG_INTERVAL_MS) {
+      appendLog(`upload ${label}: still ${record.status}... (${formatElapsed(elapsedMs)} elapsed)`);
+      lastElapsedLogMs = elapsedMs;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+
+/** Registers a fresh cancel token for `modelId` in the shared activePolls map (so "Cancel
+ * all in-flight uploads" can reach it and the button's enabled state reflects it), runs the
+ * poll to completion, then unregisters — shared by both the single-file and batch paths. */
+async function trackedPoll(modelId: string, label: string): Promise<void> {
+  const token: PollCancelToken = { cancelled: false };
+  activePolls.set(modelId, token);
+  updateCancelButtonState();
+  try {
+    await pollUntilDone(modelId, token, label);
+  } finally {
+    activePolls.delete(modelId);
+    updateCancelButtonState();
+  }
+}
+
+async function uploadToServer(file: File): Promise<void> {
+  appendLog(`uploading ${file.name} to server (POST /api/models)...`);
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/models', { method: 'POST', body: formData });
+    if (!res.ok) {
+      appendLog(`upload ${file.name} failed: ${await describeError(res)}`);
+      return;
+    }
+    const record = (await res.json()) as ModelRecord;
+    appendLog(`upload ${file.name}: created model ${record.id}, status=${record.status}`);
+    await trackedPoll(record.id, record.id);
+  } catch (err) {
+    appendLog(`upload ${file.name} failed: ${(err as Error).message}`);
+  }
+}
+
+/** Multiple files selected at once -> POST /api/models/batch in a single request (field
+ * "files", repeated), matching that endpoint's existing basename-grouping contract exactly
+ * (distinct filenames become distinct models — see server/api's own "two distinct
+ * basenames..." test). The returned models are polled concurrently and independently; each
+ * gets its own log lines prefixed by its name so the concurrent output doesn't read as one
+ * confused stream. */
+async function uploadBatchToServer(files: File[]): Promise<void> {
+  appendLog(`uploading ${files.length} files to server (POST /api/models/batch)...`);
+  try {
+    const formData = new FormData();
+    for (const file of files) formData.append('files', file);
+    const res = await fetch('/api/models/batch', { method: 'POST', body: formData });
+    if (!res.ok) {
+      appendLog(`batch upload failed: ${await describeError(res)}`);
+      return;
+    }
+    const records = (await res.json()) as ModelRecord[];
+    appendLog(`batch upload: created ${records.length} model(s) — ${records.map((r) => r.name).join(', ')}`);
+    await Promise.all(records.map((record) => trackedPoll(record.id, record.name)));
+  } catch (err) {
+    appendLog(`batch upload failed: ${(err as Error).message}`);
+  }
+}
+
+uploadBtn.addEventListener('click', () => uploadInput.click());
+uploadInput.addEventListener('change', () => {
+  const files = uploadInput.files ? [...uploadInput.files] : [];
+  if (files.length === 1) {
+    void uploadToServer(files[0]!);
+  } else if (files.length > 1) {
+    void uploadBatchToServer(files);
+  }
+  uploadInput.value = ''; // allow re-selecting the same file name(s) in a row
+});
+uploadCancelBtn.addEventListener('click', () => {
+  for (const token of activePolls.values()) token.cancelled = true;
+});

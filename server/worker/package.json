@@ -5,9 +5,14 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "lint": "eslint ."
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
   }
 }
