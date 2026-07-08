@@ -117,6 +117,26 @@ export function createModelsRouter(db: Database, config: Config): Router {
     res.json(await toModelDtoWithArtifact(db, row));
   });
 
+  // GET /api/models/{id}/linkage-map — the FBX-recovered node-name -> Linkage-key sidecar
+  // (server/worker's fbxAdapter writes linkage-map.json alongside the GLB it publishes;
+  // see CLAUDE.md invariant #3 and the Phase 4 worker's pipeline.ts). 404 if the model's
+  // current revision has no such sidecar (e.g. it was never an FBX source, or none of its
+  // Model nodes had a "Linkages" property).
+  router.get('/models/:id/linkage-map', async (req, res) => {
+    const row = await getModelRow(db, req.params.id);
+    if (!row) throw notFound(`model ${req.params.id} not found`);
+    if (row.current_revision === null) throw notFound(`model ${req.params.id} has no published revision`);
+
+    const sidecarPath = path.join(config.modelsArtifactsDir, row.id, String(row.current_revision), 'linkage-map.json');
+    let raw: string;
+    try {
+      raw = await fsp.readFile(sidecarPath, 'utf8');
+    } catch {
+      throw notFound(`no linkage map for model ${req.params.id}`);
+    }
+    res.type('application/json').send(raw);
+  });
+
   // DELETE /api/models/{id} — remove files + rows.
   router.delete('/models/:id', async (req, res) => {
     const row = await getModelRow(db, req.params.id);

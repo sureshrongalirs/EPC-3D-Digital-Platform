@@ -1,3 +1,6 @@
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+
 import { afterEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -90,6 +93,30 @@ describe('models routes', () => {
 
     expect(res.status).toBe(201);
     expect(res.body).toHaveLength(2);
+  });
+
+  it('GET /api/models/{id}/linkage-map returns 404 before any revision is published', async () => {
+    ctx = await createTestContext();
+    const uploadRes = await request(ctx.app).post('/api/models').attach('file', fbxBuffer(), 'pump-assembly.fbx');
+    const modelId = uploadRes.body.id as string;
+
+    const res = await request(ctx.app).get(`/api/models/${modelId}/linkage-map`);
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /api/models/{id}/linkage-map serves the sidecar the Phase 4 worker writes alongside a published revision', async () => {
+    ctx = await createTestContext();
+    const glbRes = await request(ctx.app).post('/api/models').attach('file', glbBuffer(), 'model.glb');
+    const modelId = glbRes.body.id as string;
+    expect(glbRes.body.currentRevision).toBe(1);
+
+    const sidecarDir = path.join(ctx.config.modelsArtifactsDir, modelId, '1');
+    await fsp.mkdir(sidecarDir, { recursive: true });
+    await fsp.writeFile(path.join(sidecarDir, 'linkage-map.json'), JSON.stringify({ 'Pump-1': 'LINK-1001' }));
+
+    const res = await request(ctx.app).get(`/api/models/${modelId}/linkage-map`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ 'Pump-1': 'LINK-1001' });
   });
 
   it('rejects a .fbx-named text file (magic-byte mismatch)', async () => {
