@@ -94,9 +94,9 @@
         <button id="show-all-btn" type="button">Show all</button>
         <span style="border-left: 1px solid #999; margin-left: 4px; padding-left: 8px">
           <button id="upload-btn" type="button">Upload to server</button>
-          <input id="upload-input" type="file" accept=".fbx,.glb" style="display: none" />
-          <label for="upload-input">upload .fbx/.glb to the server for conversion</label>
-          <button id="upload-cancel-btn" type="button" disabled>Cancel</button>
+          <input id="upload-input" type="file" accept=".fbx,.glb" multiple style="display: none" />
+          <label for="upload-input">upload one or more .fbx/.glb files to the server for conversion (each distinct filename becomes its own model)</label>
+          <button id="upload-cancel-btn" type="button" disabled>Cancel all in-flight uploads</button>
         </span>
       </div>
       <pre id="log"></pre>
