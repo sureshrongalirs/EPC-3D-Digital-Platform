@@ -4,10 +4,10 @@ import path from 'node:path';
 
 import type { Express } from 'express';
 
+import { closeDatabase, initDatabase, runMigrations, type Database } from '@plantscope/server-shared';
+
 import { createApp } from '../app.js';
 import { loadConfig, type Config } from '../config.js';
-import { closeDatabase, initDatabase, type Database } from '../db/index.js';
-import { runMigrations } from '../db/migrations.js';
 
 export interface TestContext {
   app: Express;

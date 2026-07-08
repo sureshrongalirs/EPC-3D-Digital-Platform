@@ -2,10 +2,10 @@ import 'dotenv/config';
 
 import fsp from 'node:fs/promises';
 
+import { closeDatabase, initDatabase, runMigrations } from '@plantscope/server-shared';
+
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
-import { closeDatabase, initDatabase } from './db/index.js';
-import { runMigrations } from './db/migrations.js';
 import { logger } from './logger.js';
 
 async function main(): Promise<void> {

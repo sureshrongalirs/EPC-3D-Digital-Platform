@@ -4,14 +4,20 @@ import path from 'node:path';
 
 import { Router } from 'express';
 
+import type { Database, SourceFileRef } from '@plantscope/server-shared';
+import {
+  createModel,
+  deleteModel,
+  getModelRow,
+  listModelRows,
+  publishRevision,
+  recordAudit,
+  toModelDtoWithArtifact,
+} from '@plantscope/server-shared';
+
 import type { Config } from '../config.js';
-import type { Database } from '../db/index.js';
 import { badRequest, notFound } from '../lib/problem.js';
-import { publishRevision } from '../lib/publish.js';
 import { createUploadMiddleware, groupBatchFiles, validateUploadedFile, type UploadedFile } from '../lib/upload.js';
-import { recordAudit } from '../repo/audit.js';
-import { createModel, deleteModel, getModelRow, listModelRows, toModelDtoWithArtifact } from '../repo/models.js';
-import type { SourceFileRef } from '../types.js';
 
 function toRelativePath(dataDir: string, absolutePath: string): string {
   return path.relative(dataDir, absolutePath).split(path.sep).join('/');

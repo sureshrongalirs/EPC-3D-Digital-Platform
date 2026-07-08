@@ -3,7 +3,8 @@ import crypto from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
-import { createModel } from '../repo/models.js';
+import { createModel } from '@plantscope/server-shared';
+
 import { createTestContext, type TestContext } from '../testUtil/testApp.js';
 
 describe('rotation precedence (georef + sites HTTP routes)', () => {

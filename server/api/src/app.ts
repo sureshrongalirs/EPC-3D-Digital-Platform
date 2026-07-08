@@ -1,8 +1,9 @@
 import express, { type Express } from 'express';
 import { pinoHttp } from 'pino-http';
 
+import type { Database } from '@plantscope/server-shared';
+
 import type { Config } from './config.js';
-import type { Database } from './db/index.js';
 import { errorHandler, notFoundHandler } from './lib/problem.js';
 import { logger } from './logger.js';
 import { createComponentsRouter } from './routes/components.js';

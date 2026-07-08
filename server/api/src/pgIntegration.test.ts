@@ -7,13 +7,18 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import {
+  closeDatabase,
+  createModel,
+  initDatabase,
+  publishRevision,
+  resolveRotation,
+  runMigrations,
+  type Database,
+} from '@plantscope/server-shared';
+
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
-import { closeDatabase, initDatabase, type Database } from './db/index.js';
-import { runMigrations } from './db/migrations.js';
-import { publishRevision } from './lib/publish.js';
-import { resolveRotation } from './lib/rotationPrecedence.js';
-import { createModel } from './repo/models.js';
 
 /**
  * Task's fallback rule: run the full suite against SQLite (see the other *.test.ts files

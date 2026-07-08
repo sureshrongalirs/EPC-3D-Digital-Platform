@@ -1,10 +1,9 @@
 import { Router } from 'express';
 
-import type { Database } from '../db/index.js';
+import type { Database } from '@plantscope/server-shared';
+import { getGeorefRow, getModelRow, recordAudit, resetGeoref, toGeorefDto, upsertGeoref } from '@plantscope/server-shared';
+
 import { badRequest, notFound } from '../lib/problem.js';
-import { recordAudit } from '../repo/audit.js';
-import { getGeorefRow, resetGeoref, toGeorefDto, upsertGeoref } from '../repo/georef.js';
-import { getModelRow } from '../repo/models.js';
 
 interface GeorefRequestBody {
   anchorLat?: number;

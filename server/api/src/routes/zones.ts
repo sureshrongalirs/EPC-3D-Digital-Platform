@@ -2,11 +2,19 @@ import crypto from 'node:crypto';
 
 import { Router } from 'express';
 
-import type { Database } from '../db/index.js';
+import type { Database } from '@plantscope/server-shared';
+import {
+  deleteZone,
+  getModelRow,
+  getZoneMembers,
+  getZoneRow,
+  listZoneRows,
+  recordAudit,
+  toZoneDto,
+  upsertZone,
+} from '@plantscope/server-shared';
+
 import { badRequest, notFound } from '../lib/problem.js';
-import { recordAudit } from '../repo/audit.js';
-import { getModelRow } from '../repo/models.js';
-import { deleteZone, getZoneMembers, getZoneRow, listZoneRows, toZoneDto, upsertZone } from '../repo/zones.js';
 
 interface ZoneRequestBody {
   id?: string;
