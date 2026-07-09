@@ -103,7 +103,10 @@ plugin — do not misread this as bending or breaking invariant #1.
   code comments for the token/access-requirement findings). This is never hardcoded: the
   provider config is an injectable option specifically so a self-hosted/air-gapped
   terrain+imagery source can be swapped in for a real on-premise deployment without touching
-  `@plantscope/globe-view`'s own code.
+  `@plantscope/globe-view`'s own code. Google 3D Tiles (photorealistic global imagery) is
+  also a supported swap this same way — set `imageryProviderUrl` to the Google Map Tiles API
+  root URL with a Google Cloud API key as a query parameter, again purely a config value, no
+  code change.
 
 ## Repo layout
 

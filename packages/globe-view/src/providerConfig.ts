@@ -13,6 +13,11 @@ import * as Cesium from 'cesium';
  * for a real on-premise/air-gapped deployment -- this interface exists specifically so
  * that swap never requires touching this package's own code, only the config passed to
  * `GlobeView`'s constructor.
+ *
+ * Google 3D Tiles (photorealistic global imagery) is also a supported swap: set
+ * `imageryProviderUrl` to the Google Map Tiles API root URL and supply your Google Cloud
+ * API key as a query parameter per Google's documentation -- no code change needed, purely
+ * a config value at `GlobeView` construction time.
  */
 export interface GlobeProviderConfig {
   terrainProviderUrl?: string;
