@@ -70,8 +70,11 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 
 ## Rendering surfaces: the three.js Viewer and the CesiumJS globe view
 
-`@plantscope/globe-view` (Phase 5) is a **sibling rendering surface**, not a
-`PluginContext`-based plugin — do not misread this as bending or breaking invariant #1.
+`@plantscope/globe-view` (complete; shipped as an out-of-sequence addition, not part of the
+numbered phase list below — **the authoritative Phase 5 is still "OGC 3D Tiles," not started;
+do not confuse the two even though a git branch for this work was informally named
+`phase-5-globe-view`**) is a **sibling rendering surface**, not a `PluginContext`-based
+plugin — do not misread this as bending or breaking invariant #1.
 
 - It renders into its **own `<canvas>`, its own WebGL context**, driven by CesiumJS
   (`Cesium.Viewer`), entirely separate from `@plantscope/core`'s `Viewer` and its three.js
@@ -156,3 +159,9 @@ sessions.
 - **Phase 6 (not started):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
   log, backup/restore runbook.
 - **Phase 7 (not started):** E2E tests, validation harness, load testing.
+
+**Out-of-sequence addition (complete), not part of the numbered list above:**
+`@plantscope/globe-view` — a CesiumJS 3D globe view, a sibling rendering surface to
+`@plantscope/core`'s three.js `Viewer` (see "Rendering surfaces" above). Built independently
+of the Phase 0–7 roadmap; in particular it does **not** depend on, and is not the same thing
+as, the still-not-started Phase 5 (OGC 3D Tiles).
