@@ -68,6 +68,40 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 - Height datum (ellipsoidal vs. orthometric) is stored as given and never assumed; tag as
   `unknown` if unspecified.
 
+## Rendering surfaces: the three.js Viewer and the CesiumJS globe view
+
+`@plantscope/globe-view` (Phase 5) is a **sibling rendering surface**, not a
+`PluginContext`-based plugin — do not misread this as bending or breaking invariant #1.
+
+- It renders into its **own `<canvas>`, its own WebGL context**, driven by CesiumJS
+  (`Cesium.Viewer`), entirely separate from `@plantscope/core`'s `Viewer` and its three.js
+  scene graph. Nothing in `@plantscope/globe-view` touches, imports, or reaches into
+  `@plantscope/core`'s internals, and nothing in `@plantscope/core` knows the globe view
+  exists. Invariant #1 ("plugins never touch three.js") is about code that runs *inside*
+  the `PluginContext`/`Viewer` plugin host reaching past the CoreSDK facade into three.js —
+  it says nothing about, and is not violated by, an entirely independent renderer that
+  happens to visualize the same underlying data elsewhere in the app.
+- It depends on `@plantscope/shared` for types only (`GeorefRecord`, `ModelInfo`-shaped DTOs,
+  etc.) and reads the **same catalog/georef REST API** (`GET /api/models/{id}`,
+  `GET /api/models/{id}/georef`) that `MapGeorefPlugin` and the three.js `Viewer` already
+  use — there is exactly one source of truth for a model's placement (the `georefs` table),
+  rendered by two independent, complementary views (apps/demo wires a tab/toggle between
+  them; neither replaces the other).
+- Its only structural link to the three.js side is data, never code: it loads the same
+  published GLB artifact (`ModelDto.artifactUrl`) that `Viewer.loadModel` loads, and re-derives
+  a placement transform from the same `GeorefRecord` fields (`anchorLat`/`anchorLon`/`height`/
+  `rotationDeg`/`anchorConvention`) that `MapGeorefPlugin`'s 2D map already visualizes — see
+  `packages/globe-view/src/transform.ts` for the plant-local → ECEF math, which deliberately
+  mirrors `@plantscope/shared`'s existing `localToLatLon`'s rotation convention (rotationDeg =
+  degrees clockwise from north) so the two views never disagree about which way "rotated" points.
+- Terrain/imagery defaults to Cesium Ion's hosted assets for developer convenience (that is a
+  real, currently-unavoidable exception to invariant #7's "no cloud provider dependency" for
+  the *default* dev experience — see `packages/globe-view`'s `GlobeProviderConfig` and its
+  code comments for the token/access-requirement findings). This is never hardcoded: the
+  provider config is an injectable option specifically so a self-hosted/air-gapped
+  terrain+imagery source can be swapped in for a real on-premise deployment without touching
+  `@plantscope/globe-view`'s own code.
+
 ## Repo layout
 
 ```
@@ -75,7 +109,9 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 ├── packages/
 │   ├── core/          @plantscope/core     — viewer SDK, CoreSDK facade, PluginContext
 │   ├── plugins/       @plantscope/plugins  — first-party plugins (core-facade consumers only)
-│   └── shared/        @plantscope/shared   — types/utilities shared across packages
+│   ├── shared/        @plantscope/shared   — types/utilities shared across packages
+│   └── globe-view/    @plantscope/globe-view — CesiumJS 3D globe view; a sibling rendering
+│                      surface to @plantscope/core, not a plugin — see "Rendering surfaces" above
 ├── server/
 │   ├── shared/        @plantscope/server-shared — DB layer (Database, migrations, repo/*,
 │   │                  publishRevision, resolveRotation) shared by api and worker; Node-only,
