@@ -1,5 +1,6 @@
 import type { PickResult } from '@plantscope/core';
 import { Viewer } from '@plantscope/core';
+import { GlobeView } from '@plantscope/globe-view';
 import { createLinkageMetadataPlugin, createMapGeorefPlugin, createZonesPlugin } from '@plantscope/plugins';
 
 import { linkageKeyByNodeName, mockLabelIndex } from './mockData';
@@ -18,6 +19,9 @@ function required<T extends Element>(selector: string): T {
 }
 
 const viewerContainer = required<HTMLDivElement>('#viewer');
+const globeContainer = required<HTMLDivElement>('#globe-container');
+const tab2dBtn = required<HTMLButtonElement>('#tab-2d-btn');
+const tabGlobeBtn = required<HTMLButtonElement>('#tab-globe-btn');
 const fileInput = required<HTMLInputElement>('#file-input');
 const fitBtn = required<HTMLButtonElement>('#fit-btn');
 const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
@@ -46,6 +50,12 @@ viewer.use(
   }),
 );
 
+// The currently loaded model's real catalog id, if (and only if) it came from the server
+// (auto-loaded, or uploaded-and-converted) rather than a purely local file preview -- this
+// is what the 3D globe view tab loads when activated. A locally-previewed file (loadFile,
+// below) has no catalog id at all, so switching to the globe tab for one has nothing to show.
+let currentServerModelId: string | null = null;
+
 async function loadNewestReadyModel(): Promise<void> {
   try {
     const models = (await (await fetch('/api/models')).json()) as ModelSummary[];
@@ -55,7 +65,8 @@ async function loadNewestReadyModel(): Promise<void> {
       return;
     }
     appendLog(`auto-loading newest ready model "${newestReady.name}"...`);
-    const modelInfo = await viewer.loadModel(newestReady.artifactUrl);
+    const modelInfo = await viewer.loadModel({ id: newestReady.id, name: newestReady.name });
+    currentServerModelId = newestReady.id;
     appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to reach the API: ${(err as Error).message}`);
@@ -77,6 +88,7 @@ async function loadFile(file: File): Promise<void> {
   try {
     const buffer = await file.arrayBuffer();
     const modelInfo = await viewer.loadModel(buffer);
+    currentServerModelId = null; // a local preview has no catalog id -- see its declaration above
     appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to load ${file.name}: ${(err as Error).message}`);
@@ -191,6 +203,7 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
     if (record.status === 'ready') {
       try {
         const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
+        currentServerModelId = modelId; // see its declaration above loadNewestReadyModel
         appendLog(`upload ${label}: loaded "${modelInfo.name}" — ${modelInfo.objectCount} objects`);
       } catch (err) {
         appendLog(`upload ${label}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
@@ -284,3 +297,53 @@ uploadInput.addEventListener('change', () => {
 uploadCancelBtn.addEventListener('click', () => {
   for (const token of activePolls.values()) token.cancelled = true;
 });
+
+// --- 3D Globe view tab: a sibling rendering surface (own canvas, own Cesium.Viewer/WebGL
+// context), not a plugin -- see CLAUDE.md's "Rendering surfaces" note. Complementary to the
+// 2D Map/Georeference view above, not a replacement: both read the same georef data via the
+// same REST API, just rendered differently. Constructed lazily (only on first activation) so
+// a Cesium.Viewer/WebGL context is never created unless the tab is actually used.
+let globeView: GlobeView | null = null;
+
+function ensureGlobeView(): GlobeView {
+  globeView ??= new GlobeView(globeContainer);
+  return globeView;
+}
+
+function activate2dTab(): void {
+  tab2dBtn.setAttribute('aria-pressed', 'true');
+  tabGlobeBtn.setAttribute('aria-pressed', 'false');
+  viewerContainer.style.display = '';
+  globeContainer.style.display = 'none';
+}
+
+async function activateGlobeTab(): Promise<void> {
+  tab2dBtn.setAttribute('aria-pressed', 'false');
+  tabGlobeBtn.setAttribute('aria-pressed', 'true');
+  viewerContainer.style.display = 'none';
+  globeContainer.style.display = '';
+
+  if (!currentServerModelId) {
+    appendLog(
+      '3D globe view: no server-backed model is currently loaded (a local-preview file has no ' +
+        'catalog id to look up) -- upload one, or wait for the auto-loaded catalog model, then switch tabs again.',
+    );
+    return;
+  }
+
+  try {
+    const result = await ensureGlobeView().loadModelById(currentServerModelId);
+    if (result.kind === 'placed') {
+      appendLog(`3D globe view: placed — ${result.statusLabel}`);
+    } else if (result.kind === 'no-georef') {
+      appendLog('3D globe view: this model has no georeference set yet -- set one in the 2D Map/Georeference view first.');
+    } else {
+      appendLog(`3D globe view: model is not ready yet (status: ${result.status}).`);
+    }
+  } catch (err) {
+    appendLog(`3D globe view failed to load the model: ${(err as Error).message}`);
+  }
+}
+
+tab2dBtn.addEventListener('click', activate2dTab);
+tabGlobeBtn.addEventListener('click', () => void activateGlobeTab());

@@ -17,3 +17,8 @@ deploy/data/
 
 # server/api's local dev DATA_DIR default (SQLite file + uploaded models) — see .env.example
 server/api/data/
+
+# Cesium's static asset tree, copied from node_modules at dev/build time (large and fully
+# reproducible — see apps/demo/scripts/copy-cesium-assets.mjs), unlike the tiny vendored
+# DRACO decoder in apps/demo/public/draco/ which stays committed.
+apps/demo/public/cesium/

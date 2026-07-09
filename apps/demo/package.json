@@ -4,18 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node scripts/copy-cesium-assets.mjs && vite",
+    "build": "node scripts/copy-cesium-assets.mjs && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "lint": "eslint ."
   },
   "dependencies": {
     "@plantscope/core": "workspace:*",
+    "@plantscope/globe-view": "workspace:*",
     "@plantscope/plugins": "workspace:*",
     "@plantscope/shared": "workspace:*"
   },
   "devDependencies": {
+    "cesium": "^1.143.0",
     "vite": "^6.0.5"
   }
 }
