@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PlantScope demo</title>
+    <!-- Cesium.Viewer's toolbar/zoom/home/fullscreen widgets rely on this stylesheet for
+         their absolute positioning -- without it they render unstyled, in normal document
+         flow, stacked in the page's top-left corner with a tiny canvas (found via a
+         Playwright screenshot while verifying this app's globe-as-primary-view redesign).
+         Copied alongside the rest of Cesium's static assets -- see
+         scripts/copy-cesium-assets.mjs and window.CESIUM_BASE_URL below. -->
+    <link rel="stylesheet" href="/cesium/Widgets/widgets.css" />
     <style>
       html,
       body {
@@ -17,14 +24,11 @@
         height: 100vh;
         overflow: hidden;
       }
-      #viewer,
+      /* The 3D globe is the only, primary view -- it fills the whole window; every other
+         control floats over it as an overlay (see #controls/#properties-panel/#log below). */
       #globe-container {
         position: absolute;
         inset: 0;
-      }
-      #view-tabs button[aria-pressed='true'] {
-        font-weight: bold;
-        text-decoration: underline;
       }
       #controls {
         position: absolute;
@@ -38,6 +42,27 @@
         flex-wrap: wrap;
         padding: 8px;
         background: rgba(255, 255, 255, 0.85);
+      }
+      #properties-panel {
+        position: absolute;
+        top: 48px;
+        right: 0;
+        bottom: 30%;
+        width: 320px;
+        z-index: 10;
+        overflow-y: auto;
+        background: rgba(255, 255, 255, 0.95);
+        border-left: 1px solid #ccc;
+        padding: 8px;
+        font: 13px monospace;
+      }
+      #properties-panel table {
+        border-collapse: collapse;
+      }
+      #properties-panel th {
+        text-align: left;
+        padding-right: 8px;
+        color: #555;
       }
       #log {
         position: absolute;
@@ -54,51 +79,15 @@
         padding: 8px;
         white-space: pre-wrap;
       }
-      .plantscope-toolbar,
-      .plantscope-panel {
-        position: absolute;
-        z-index: 10;
-      }
-      .plantscope-panel {
-        top: 48px;
-        right: 0;
-        bottom: 30%;
-        width: 340px;
-        overflow-y: auto;
-        background: rgba(255, 255, 255, 0.95);
-        border-left: 1px solid #ccc;
-        padding: 4px 8px;
-      }
-      .plantscope-panel-entry {
-        border-bottom: 1px solid #ddd;
-        padding: 8px 0;
-      }
-      .plantscope-panel-entry table {
-        border-collapse: collapse;
-      }
-      .plantscope-panel-entry th {
-        text-align: left;
-        padding-right: 8px;
-        color: #555;
-      }
-      .plantscope-panel-entry li {
-        list-style: none;
-        margin-bottom: 4px;
-      }
     </style>
   </head>
   <body>
     <div id="app">
-      <div id="viewer"></div>
-      <div id="globe-container" style="display: none"></div>
+      <div id="globe-container"></div>
       <div id="controls">
         <strong>PlantScope demo</strong>
-        <span id="view-tabs" style="border-right: 1px solid #999; margin-right: 4px; padding-right: 8px">
-          <button id="tab-2d-btn" type="button" aria-pressed="true">2D Map/Georef</button>
-          <button id="tab-globe-btn" type="button" aria-pressed="false">3D Globe</button>
-        </span>
         <input id="file-input" type="file" accept=".glb" />
-        <span>or drag &amp; drop a .glb anywhere in the viewport (local preview only, loaded directly in-browser)</span>
+        <span>or drag &amp; drop a .glb anywhere in the window (local preview -- placed at the default location; no LLH/georef for a local file)</span>
         <button id="fit-btn" type="button">Fit</button>
         <button id="isolate-btn" type="button">Isolate last pick</button>
         <button id="show-all-btn" type="button">Show all</button>
@@ -109,6 +98,7 @@
           <button id="upload-cancel-btn" type="button" disabled>Cancel all in-flight uploads</button>
         </span>
       </div>
+      <div id="properties-panel">Click an object on the globe to see its properties.</div>
       <pre id="log"></pre>
     </div>
     <script>
