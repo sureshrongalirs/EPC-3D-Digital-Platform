@@ -68,6 +68,53 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 - Height datum (ellipsoidal vs. orthometric) is stored as given and never assumed; tag as
   `unknown` if unspecified.
 
+## Rendering surfaces: the three.js Viewer and the CesiumJS globe view
+
+`@plantscope/globe-view` (complete; shipped as an out-of-sequence addition, not part of the
+numbered phase list below — **the authoritative Phase 5 is still "OGC 3D Tiles," not started;
+do not confuse the two even though a git branch for this work was informally named
+`phase-5-globe-view`**) is a **sibling rendering surface**, not a `PluginContext`-based
+plugin — do not misread this as bending or breaking invariant #1.
+
+- It renders into its **own `<canvas>`, its own WebGL context**, driven by CesiumJS
+  (`Cesium.Viewer`), entirely separate from `@plantscope/core`'s `Viewer` and its three.js
+  scene graph. Nothing in `@plantscope/globe-view` touches, imports, or reaches into
+  `@plantscope/core`'s internals, and nothing in `@plantscope/core` knows the globe view
+  exists. Invariant #1 ("plugins never touch three.js") is about code that runs *inside*
+  the `PluginContext`/`Viewer` plugin host reaching past the CoreSDK facade into three.js —
+  it says nothing about, and is not violated by, an entirely independent renderer that
+  happens to visualize the same underlying data elsewhere in the app.
+- It depends on `@plantscope/shared` for types only (`GeorefRecord`, `ModelInfo`-shaped DTOs,
+  etc.) and reads the **same catalog/georef REST API** (`GET /api/models/{id}`,
+  `GET /api/models/{id}/georef`) that `MapGeorefPlugin` and the three.js `Viewer` already
+  use — there is exactly one source of truth for a model's placement (the `georefs` table).
+- Its only structural link to the three.js side is data, never code: it loads the same
+  published GLB artifact (`ModelDto.artifactUrl`) that `Viewer.loadModel` loads, and re-derives
+  a placement transform from the same `GeorefRecord` fields (`anchorLat`/`anchorLon`/`height`/
+  `rotationDeg`/`anchorConvention`) that `MapGeorefPlugin`'s 2D map already visualizes — see
+  `packages/globe-view/src/transform.ts` for the plant-local → ECEF math, which deliberately
+  mirrors `@plantscope/shared`'s existing `localToLatLon`'s rotation convention (rotationDeg =
+  degrees clockwise from north) so the two never disagree about which way "rotated" points.
+- **apps/demo currently uses only the globe view.** An earlier version wired a 2D Map/Georef
+  ↔ 3D Globe tab toggle (both views side by side); the three.js `Viewer`, its plugins
+  (`ZonesPlugin`/`MapGeorefPlugin`/`LinkageMetadataPlugin`), and the tab-switching UI were
+  later removed from `apps/demo` entirely so the globe is the app's only, primary view — see
+  its own git history for that change. `@plantscope/core` and `@plantscope/plugins` are
+  untouched and remain valid for any other consumer; `apps/demo` simply isn't one anymore.
+  A model with no georef record is still shown (not left unplaced) at a clearly-labeled
+  default location (`GlobeView.DEFAULT_FALLBACK_ANCHOR`, Hyderabad) rather than refusing to
+  render it.
+- Terrain/imagery defaults to Cesium Ion's hosted assets for developer convenience (that is a
+  real, currently-unavoidable exception to invariant #7's "no cloud provider dependency" for
+  the *default* dev experience — see `packages/globe-view`'s `GlobeProviderConfig` and its
+  code comments for the token/access-requirement findings). This is never hardcoded: the
+  provider config is an injectable option specifically so a self-hosted/air-gapped
+  terrain+imagery source can be swapped in for a real on-premise deployment without touching
+  `@plantscope/globe-view`'s own code. Google 3D Tiles (photorealistic global imagery) is
+  also a supported swap this same way — set `imageryProviderUrl` to the Google Map Tiles API
+  root URL with a Google Cloud API key as a query parameter, again purely a config value, no
+  code change.
+
 ## Repo layout
 
 ```
@@ -75,7 +122,9 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 ├── packages/
 │   ├── core/          @plantscope/core     — viewer SDK, CoreSDK facade, PluginContext
 │   ├── plugins/       @plantscope/plugins  — first-party plugins (core-facade consumers only)
-│   └── shared/        @plantscope/shared   — types/utilities shared across packages
+│   ├── shared/        @plantscope/shared   — types/utilities shared across packages
+│   └── globe-view/    @plantscope/globe-view — CesiumJS 3D globe view; a sibling rendering
+│                      surface to @plantscope/core, not a plugin — see "Rendering surfaces" above
 ├── server/
 │   ├── shared/        @plantscope/server-shared — DB layer (Database, migrations, repo/*,
 │   │                  publishRevision, resolveRotation) shared by api and worker; Node-only,
@@ -120,3 +169,9 @@ sessions.
 - **Phase 6 (not started):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
   log, backup/restore runbook.
 - **Phase 7 (not started):** E2E tests, validation harness, load testing.
+
+**Out-of-sequence addition (complete), not part of the numbered list above:**
+`@plantscope/globe-view` — a CesiumJS 3D globe view, a sibling rendering surface to
+`@plantscope/core`'s three.js `Viewer` (see "Rendering surfaces" above). Built independently
+of the Phase 0–7 roadmap; in particular it does **not** depend on, and is not the same thing
+as, the still-not-started Phase 5 (OGC 3D Tiles).

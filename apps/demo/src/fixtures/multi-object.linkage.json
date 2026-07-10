@@ -1,4 +1,0 @@
-{
-  "_comment": "Sidecar for testdata/fixtures/multi-object.glb — node name -> Linkage key. Stands in for the real Properties70-parsed Linkage key until Phase 4's worker exists (see CLAUDE.md invariant #3). Only Pump-1 has an entry on purpose: it exercises LinkageMetadataPlugin's full-join tier, while Pump-2/Valve-1/Tank-1 exercise the fuzzy-match and geometry-only degradation tiers.",
-  "Pump-1": "LINK-1001"
-}

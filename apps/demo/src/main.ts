@@ -1,8 +1,4 @@
-import type { PickResult } from '@plantscope/core';
-import { Viewer } from '@plantscope/core';
-import { createLinkageMetadataPlugin, createMapGeorefPlugin, createZonesPlugin } from '@plantscope/plugins';
-
-import { linkageKeyByNodeName, mockLabelIndex } from './mockData';
+import { GlobeView, type PickedNodeInfo } from '@plantscope/globe-view';
 
 interface ModelSummary {
   id: string;
@@ -17,7 +13,8 @@ function required<T extends Element>(selector: string): T {
   return el;
 }
 
-const viewerContainer = required<HTMLDivElement>('#viewer');
+const globeContainer = required<HTMLDivElement>('#globe-container');
+const propertiesPanel = required<HTMLDivElement>('#properties-panel');
 const fileInput = required<HTMLInputElement>('#file-input');
 const fitBtn = required<HTMLButtonElement>('#fit-btn');
 const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
@@ -32,52 +29,61 @@ function appendLog(message: string): void {
   log.textContent = `${time}  ${message}\n${log.textContent ?? ''}`;
 }
 
-// Phase 3: talks to the real server/api over relative paths (see vite.config.ts's dev
-// proxy) — no more in-memory mock RestClient. mockComponents/mockLabelIndex stay for
-// LinkageMetadataPlugin's fuzzy-match tier only (the API doesn't do label search itself).
-const viewer = new Viewer(viewerContainer, {});
+function escapeHtml(value: string): string {
+  const div = document.createElement('div');
+  div.textContent = value;
+  return div.innerHTML;
+}
 
-viewer.use(createZonesPlugin());
-viewer.use(createMapGeorefPlugin());
-viewer.use(
-  createLinkageMetadataPlugin({
-    linkageKeyByNodeName,
-    labelIndex: mockLabelIndex,
-  }),
-);
+function renderProperties(picked: PickedNodeInfo): void {
+  if (!picked.componentProps) {
+    propertiesPanel.textContent = `${picked.nodeName}: no engineering properties found for this node.`;
+    return;
+  }
+  const rows = Object.entries(picked.componentProps)
+    .map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(String(value))}</td></tr>`)
+    .join('');
+  propertiesPanel.innerHTML = `<strong>${escapeHtml(picked.nodeName)}</strong><table>${rows}</table>`;
+}
+
+// The 3D globe is the ONLY view (see CLAUDE.md's "Rendering surfaces" note) -- constructed
+// immediately, in a container that's visible with real pixel dimensions from the very first
+// render (not lazily, not inside a hidden div; that was a real bug in an earlier version of
+// this app). No model is loaded yet at this point -- the globe itself (Earth) is visible
+// right away regardless.
+let lastPickedNodeName: string | null = null;
+
+const globeView = new GlobeView(globeContainer, {
+  providerConfig: { ionAccessToken: import.meta.env.VITE_CESIUM_ION_TOKEN },
+  onStatus: appendLog,
+  onPick: (picked) => {
+    lastPickedNodeName = picked.nodeName;
+    renderProperties(picked);
+    appendLog(`pick -> ${picked.nodeName}`);
+  },
+});
 
 async function loadNewestReadyModel(): Promise<void> {
   try {
     const models = (await (await fetch('/api/models')).json()) as ModelSummary[];
     const newestReady = models.find((m) => m.status === 'ready' && m.artifactUrl);
-    if (!newestReady?.artifactUrl) {
-      appendLog('no ready model in the catalog yet — upload one below.');
+    if (!newestReady) {
+      appendLog('no ready model in the catalog yet -- upload one below.');
       return;
     }
     appendLog(`auto-loading newest ready model "${newestReady.name}"...`);
-    const modelInfo = await viewer.loadModel(newestReady.artifactUrl);
-    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
+    const result = await globeView.loadModelById(newestReady.id);
+    if (result.kind === 'placed') appendLog(`placed "${newestReady.name}": ${result.statusLabel}`);
   } catch (err) {
     appendLog(`failed to reach the API: ${(err as Error).message}`);
   }
 }
 void loadNewestReadyModel();
 
-let lastPickedId: string | null = null;
-
-viewer.on('pick', (...args: unknown[]) => {
-  const result = args[0] as PickResult;
-  lastPickedId = result.objectId;
-  viewer.highlight([result.objectId]);
-  appendLog(`pick -> ${JSON.stringify(result)}`);
-});
-
 async function loadFile(file: File): Promise<void> {
-  appendLog(`loading ${file.name}...`);
+  appendLog(`loading ${file.name} (local preview)...`);
   try {
-    const buffer = await file.arrayBuffer();
-    const modelInfo = await viewer.loadModel(buffer);
-    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
+    await globeView.loadLocalFile(file);
   } catch (err) {
     appendLog(`failed to load ${file.name}: ${(err as Error).message}`);
   }
@@ -88,12 +94,12 @@ fileInput.addEventListener('change', () => {
   if (file) void loadFile(file);
 });
 
-// Drag-drop is attached to the viewer container itself (not a covering overlay) so it
-// never blocks pointer events needed for pick().
-viewerContainer.addEventListener('dragover', (event) => {
+// Drag-drop is attached to the globe container itself (not a covering overlay) so it never
+// blocks pointer events needed for picking.
+globeContainer.addEventListener('dragover', (event) => {
   event.preventDefault();
 });
-viewerContainer.addEventListener('drop', (event) => {
+globeContainer.addEventListener('drop', (event) => {
   event.preventDefault();
   const file = event.dataTransfer?.files?.[0];
   if (file) void loadFile(file);
@@ -102,20 +108,23 @@ viewerContainer.addEventListener('drop', (event) => {
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
 
-fitBtn.addEventListener('click', () => viewer.fitToModel());
+fitBtn.addEventListener('click', () => globeView.fitToModel());
 isolateBtn.addEventListener('click', () => {
-  if (lastPickedId) viewer.isolate([lastPickedId]);
+  if (lastPickedNodeName) globeView.isolate(lastPickedNodeName);
 });
-showAllBtn.addEventListener('click', () => viewer.showAll());
+showAllBtn.addEventListener('click', () => globeView.showAll());
 
 // --- Upload to server: distinct from the local-preview file-input/drag-drop above, which
-// loads bytes directly via viewer.loadModel(ArrayBuffer) and never touches the API. This
-// path POSTs to /api/models (single file) or /api/models/batch (multiple files, field
-// "files" repeated -- distinct filenames become distinct models per that endpoint's own
-// basename-grouping contract), then polls GET /api/models/{id} per created model until the
-// Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish) finishes
-// conversion, and only then loads the real published artifact via
-// viewer.loadModel({ id, name }). Multiple models poll concurrently, independently.
+// loads bytes directly via globeView.loadLocalFile(File) and never touches the API. Always
+// POSTs to /api/models/batch (field "files", repeated), even for a single file -- see
+// uploadFilesToServer's doc comment for why always using the batch endpoint (rather than
+// branching to a single-file POST /api/models) matters for correctly grouping an FBX with
+// an LLH file uploaded alongside it. Then polls GET /api/models/{id} per created model until
+// the Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish)
+// finishes conversion, and only then loads the real published artifact via
+// globeView.loadModelById(id), which reads back whatever georef the worker already wrote
+// from an LLH file in that same batch -- no manual "save georeference" step needed here.
+// Multiple models poll concurrently, independently.
 
 interface ModelRecord {
   id: string;
@@ -145,7 +154,7 @@ function formatElapsed(ms: number): string {
 }
 
 /** Cancellation is a deliberate user action (the "Cancel all in-flight uploads" button
- * below), not an assumption baked into the poll itself — real conversions (e.g. a large FBX
+ * below), not an assumption baked into the poll itself -- real conversions (e.g. a large FBX
  * through assimp + Draco) can legitimately take several minutes, so there is no timeout
  * duration that's both safe to give up at and short enough to be a useful default. A worker
  * that's genuinely stuck is better diagnosed by looking at its own logs than by the browser
@@ -154,11 +163,11 @@ interface PollCancelToken {
   cancelled: boolean;
 }
 
-// One entry per in-flight poll, keyed by model id — lets multiple uploads (from a single
+// One entry per in-flight poll, keyed by model id -- lets multiple uploads (from a single
 // batch selection, or several separate uploads in a row) run concurrently, each independently
 // cancellable, and lets "Cancel all in-flight uploads" reach every one of them at once. A
 // per-row cancel button (cancelling just one upload) would be a nice follow-up but isn't
-// implemented here — this pass only adds an all-or-nothing cancel.
+// implemented here -- this pass only adds an all-or-nothing cancel.
 const activePolls = new Map<string, PollCancelToken>();
 
 function updateCancelButtonState(): void {
@@ -172,7 +181,7 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
 
   for (;;) {
     if (token.cancelled) {
-      appendLog(`upload ${label}: cancelled by user after ${formatElapsed(Date.now() - startedAt)} — the job keeps running on the server.`);
+      appendLog(`upload ${label}: cancelled by user after ${formatElapsed(Date.now() - startedAt)} -- the job keeps running on the server.`);
       return;
     }
 
@@ -190,19 +199,19 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
 
     if (record.status === 'ready') {
       try {
-        const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
-        appendLog(`upload ${label}: loaded "${modelInfo.name}" — ${modelInfo.objectCount} objects`);
+        const result = await globeView.loadModelById(modelId);
+        if (result.kind === 'placed') appendLog(`upload ${label}: placed -- ${result.statusLabel}`);
       } catch (err) {
         appendLog(`upload ${label}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
       }
       return;
     }
     if (record.status === 'failed') {
-      appendLog(`upload ${label}: FAILED — ${record.error ?? 'unknown error'}`);
+      appendLog(`upload ${label}: FAILED -- ${record.error ?? 'unknown error'}`);
       return;
     }
 
-    // Still queued/processing — a periodic heartbeat so it's clear the poll itself hasn't
+    // Still queued/processing -- a periodic heartbeat so it's clear the poll itself hasn't
     // hung, separate from (and possibly on the same tick as) a status-transition log above.
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs - lastElapsedLogMs >= STILL_GOING_LOG_INTERVAL_MS) {
@@ -216,7 +225,7 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
 
 /** Registers a fresh cancel token for `modelId` in the shared activePolls map (so "Cancel
  * all in-flight uploads" can reach it and the button's enabled state reflects it), runs the
- * poll to completion, then unregisters — shared by both the single-file and batch paths. */
+ * poll to completion, then unregisters -- shared by both the single-file and batch paths. */
 async function trackedPoll(modelId: string, label: string): Promise<void> {
   const token: PollCancelToken = { cancelled: false };
   activePolls.set(modelId, token);
@@ -229,56 +238,40 @@ async function trackedPoll(modelId: string, label: string): Promise<void> {
   }
 }
 
-async function uploadToServer(file: File): Promise<void> {
-  appendLog(`uploading ${file.name} to server (POST /api/models)...`);
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await fetch('/api/models', { method: 'POST', body: formData });
-    if (!res.ok) {
-      appendLog(`upload ${file.name} failed: ${await describeError(res)}`);
-      return;
-    }
-    const record = (await res.json()) as ModelRecord;
-    appendLog(`upload ${file.name}: created model ${record.id}, status=${record.status}`);
-    await trackedPoll(record.id, record.id);
-  } catch (err) {
-    appendLog(`upload ${file.name} failed: ${(err as Error).message}`);
-  }
-}
-
-/** Multiple files selected at once -> POST /api/models/batch in a single request (field
- * "files", repeated), matching that endpoint's existing basename-grouping contract exactly
- * (distinct filenames become distinct models — see server/api's own "two distinct
- * basenames..." test). The returned models are polled concurrently and independently; each
- * gets its own log lines prefixed by its name so the concurrent output doesn't read as one
- * confused stream. */
-async function uploadBatchToServer(files: File[]): Promise<void> {
-  appendLog(`uploading ${files.length} files to server (POST /api/models/batch)...`);
+/** Always POSTs to /api/models/batch (field "files", repeated) -- even for a single file --
+ * rather than branching to the single-file POST /api/models for that case. /api/models/batch
+ * groups by basename (server/api's own "two distinct basenames..." test), so an FBX
+ * uploaded alongside an LLH file with the same basename (e.g. "plant.fbx" + "plant.llh")
+ * is grouped into one model regardless of selection order; sending them as two separate
+ * single-file uploads instead would create two unrelated models and the LLH would never
+ * reach the worker as that FBX's georef source. The worker already parses an LLH file and
+ * writes its georef automatically (Phase 4) -- by the time a model's status is 'ready',
+ * loadModelById's GET .../georef already has it, with no extra "save georeference" step
+ * needed here. The returned models are polled concurrently and independently; each gets its
+ * own log lines prefixed by its name so concurrent output doesn't read as one confused
+ * stream. */
+async function uploadFilesToServer(files: File[]): Promise<void> {
+  appendLog(`uploading ${files.length} file(s) to server (POST /api/models/batch)...`);
   try {
     const formData = new FormData();
     for (const file of files) formData.append('files', file);
     const res = await fetch('/api/models/batch', { method: 'POST', body: formData });
     if (!res.ok) {
-      appendLog(`batch upload failed: ${await describeError(res)}`);
+      appendLog(`upload failed: ${await describeError(res)}`);
       return;
     }
     const records = (await res.json()) as ModelRecord[];
-    appendLog(`batch upload: created ${records.length} model(s) — ${records.map((r) => r.name).join(', ')}`);
+    appendLog(`upload: created ${records.length} model(s) -- ${records.map((r) => r.name).join(', ')}`);
     await Promise.all(records.map((record) => trackedPoll(record.id, record.name)));
   } catch (err) {
-    appendLog(`batch upload failed: ${(err as Error).message}`);
+    appendLog(`upload failed: ${(err as Error).message}`);
   }
 }
 
 uploadBtn.addEventListener('click', () => uploadInput.click());
 uploadInput.addEventListener('change', () => {
   const files = uploadInput.files ? [...uploadInput.files] : [];
-  if (files.length === 1) {
-    void uploadToServer(files[0]!);
-  } else if (files.length > 1) {
-    void uploadBatchToServer(files);
-  }
+  if (files.length > 0) void uploadFilesToServer(files);
   uploadInput.value = ''; // allow re-selecting the same file name(s) in a row
 });
 uploadCancelBtn.addEventListener('click', () => {
