@@ -22,6 +22,38 @@ function parseNumber(raw: string, field: string): number {
   return value;
 }
 
+const NUMBER_TOKEN = /^-?\d+(\.\d+)?$/;
+
+/**
+ * Real-world LLH files (as actually produced alongside an FBX upload) are a single line of
+ * 3 whitespace-separated numbers, in Longitude Latitude Height order -- e.g.:
+ *   -111.73694444444445 57.32694444444445 0
+ * with no "Latitude:"/"Longitude:" labels at all. Detected by: the whole file has no ':'
+ * anywhere (ruling out the labeled line format below) and reduces to exactly one non-blank
+ * line of exactly 3 numeric tokens. Returns null (not a match) rather than throwing, so
+ * parseLLH can fall through to the other formats when this one doesn't apply.
+ */
+function parseCoordinateTripletShape(text: string): ParsedLLH | null {
+  if (text.includes(':')) return null;
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 1) return null;
+
+  const tokens = lines[0]!.split(/\s+/);
+  if (tokens.length !== 3 || !tokens.every((token) => NUMBER_TOKEN.test(token))) return null;
+
+  const [lonRaw, latRaw, heightRaw] = tokens as [string, string, string];
+  const longitude = Number(lonRaw);
+  const latitude = Number(latRaw);
+  const height = Number(heightRaw);
+  validateRanges(latitude, longitude);
+
+  return { latitude, longitude, height, rotationDeg: undefined };
+}
+
 /** JSON-equivalent shape: { latitude, longitude, height?, rotation? } (case-insensitive
  * keys tolerated by lowercasing before lookup). */
 function parseJsonShape(text: string): ParsedLLH {
@@ -83,11 +115,16 @@ function parseLineShape(text: string): ParsedLLH {
   };
 }
 
-/** Parses an LLH anchor file: either the "Latitude:/Longitude:/Height:[/Rotation:]" line
- * format, or an equivalent flat JSON object. Throws with a descriptive message on malformed
- * input or out-of-range coordinates. */
+/** Parses an LLH anchor file: the real-world bare "Longitude Latitude Height" single-line
+ * triplet, the "Latitude:/Longitude:/Height:[/Rotation:]" labeled line format, or an
+ * equivalent flat JSON object. Throws with a descriptive message on malformed input or
+ * out-of-range coordinates. */
 export function parseLLH(text: string): ParsedLLH {
   const trimmed = text.trim();
   if (trimmed.startsWith('{')) return parseJsonShape(trimmed);
+
+  const triplet = parseCoordinateTripletShape(trimmed);
+  if (triplet) return triplet;
+
   return parseLineShape(trimmed);
 }
