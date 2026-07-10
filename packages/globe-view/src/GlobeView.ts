@@ -63,6 +63,38 @@ interface CesiumPickResult {
   detail?: { node?: { name?: string } };
 }
 
+/**
+ * Replaces `input.height` with the real ground height Cesium's terrain provider reports at
+ * that lat/lon. Without this, a model placed at a georef's raw height (or the fixed
+ * DEFAULT_FALLBACK_ANCHOR height) sinks underground the moment real terrain data loads at a
+ * given viewing distance: a georef's height is frequently 0 or an uncalibrated estimate
+ * (CLAUDE.md never assumes a height datum is meaningful -- height_datum is tagged 'unknown'
+ * unless stated), and even a real height is measured against an ellipsoid or sea-level
+ * datum that rarely matches Cesium World Terrain's actual elevation at that exact point.
+ * From far away the terrain is coarse low-resolution geometry, so a few dozen meters of
+ * mismatch isn't visible; zooming in loads high-detail terrain and the model, still sitting
+ * at its old height, ends up literally inside the ground and gets occluded -- this was the
+ * reported "model disappears when zooming in" bug. sampleTerrainMostDetailed() queries the
+ * terrain provider directly (not "whatever happens to be rendered right now"), so it works
+ * regardless of current camera position. Falls back to the original height if sampling
+ * fails (e.g. no terrain provider ever loaded -- see setupProviders' catch branch) rather
+ * than throwing, since a mis-elevated-but-visible model beats a hard failure.
+ */
+async function clampToGroundHeight(viewer: Cesium.Viewer, input: GlobeTransformInput): Promise<GlobeTransformInput> {
+  try {
+    const [sampled] = await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, [
+      Cesium.Cartographic.fromDegrees(input.anchorLon, input.anchorLat),
+    ]);
+    if (sampled && Number.isFinite(sampled.height)) {
+      return { ...input, height: sampled.height };
+    }
+  } catch {
+    // Terrain sampling failing (e.g. an EllipsoidTerrainProvider with no real tile
+    // availability, or a network hiccup) isn't fatal -- fall through to the original height.
+  }
+  return input;
+}
+
 function computeCentroid(bboxMin: [number, number, number] | null, bboxMax: [number, number, number] | null): ModelCentroid | undefined {
   if (!bboxMin || !bboxMax) return undefined;
   return {
@@ -204,7 +236,8 @@ export class GlobeView {
     }
 
     const centroid = computeCentroid(model.bboxMin, model.bboxMax);
-    const modelMatrix = computeGlobeModelMatrix(georef ?? DEFAULT_FALLBACK_ANCHOR, centroid);
+    const groundClampedAnchor = await clampToGroundHeight(this.viewer, georef ?? DEFAULT_FALLBACK_ANCHOR);
+    const modelMatrix = computeGlobeModelMatrix(groundClampedAnchor, centroid);
 
     const artifactUrl = `${this.apiBaseUrl}${model.artifactUrl}`;
     const buffer = await (await fetch(artifactUrl)).arrayBuffer();
@@ -226,7 +259,8 @@ export class GlobeView {
     this.currentModelId = null;
 
     const buffer = await file.arrayBuffer();
-    const modelMatrix = computeGlobeModelMatrix(DEFAULT_FALLBACK_ANCHOR);
+    const groundClampedAnchor = await clampToGroundHeight(this.viewer, DEFAULT_FALLBACK_ANCHOR);
+    const modelMatrix = computeGlobeModelMatrix(groundClampedAnchor);
     await this.placeModelFromBytes(buffer, modelMatrix);
     this.onStatus(`"${file.name}": ${DEFAULT_FALLBACK_LABEL} (local preview)`);
   }
@@ -236,7 +270,14 @@ export class GlobeView {
 
     const blobUrl = URL.createObjectURL(new Blob([buffer], { type: 'model/gltf-binary' }));
     try {
-      const cesiumModel = await Cesium.Model.fromGltfAsync({ url: blobUrl, modelMatrix });
+      // minimumPixelSize (default 0) and maximumScale (default uncapped) already do NOT
+      // artificially shrink/grow a model based on camera distance unless explicitly
+      // configured to -- neither was set here, so LOD-driven scaling was checked and ruled
+      // out as a cause of the "model disappears when zooming in" bug (that turned out to be
+      // clampToGroundHeight's absence, above). minimumPixelSize is still passed explicitly
+      // (rather than left implicit) so this is verifiable at a glance rather than relying on
+      // Cesium's default matching what we want.
+      const cesiumModel = await Cesium.Model.fromGltfAsync({ url: blobUrl, modelMatrix, minimumPixelSize: 0 });
       this.viewer.scene.primitives.add(cesiumModel);
       this.currentModel = cesiumModel;
 
@@ -244,6 +285,12 @@ export class GlobeView {
       // it's ready to render -- boundingSphere etc. only become valid on a later
       // render-loop tick. Must wait for readyEvent (or ready already being true).
       await this.waitUntilModelReady(cesiumModel);
+
+      // Logged so an unexpectedly tiny/huge radius (a scale bug) is visible without
+      // needing to reproduce visually -- see this task's "model disappears when zooming in"
+      // investigation, point (b).
+      console.log(`GlobeView: model boundingSphere radius = ${cesiumModel.boundingSphere.radius}m`);
+
       this.viewer.camera.flyToBoundingSphere(cesiumModel.boundingSphere, { duration: 1.5 });
     } finally {
       URL.revokeObjectURL(blobUrl);
