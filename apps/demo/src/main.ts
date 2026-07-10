@@ -306,7 +306,9 @@ uploadCancelBtn.addEventListener('click', () => {
 let globeView: GlobeView | null = null;
 
 function ensureGlobeView(): GlobeView {
-  globeView ??= new GlobeView(globeContainer);
+  globeView ??= new GlobeView(globeContainer, {
+    providerConfig: { ionAccessToken: import.meta.env.VITE_CESIUM_ION_TOKEN },
+  });
   return globeView;
 }
 
