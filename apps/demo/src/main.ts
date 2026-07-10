@@ -115,14 +115,15 @@ isolateBtn.addEventListener('click', () => {
 showAllBtn.addEventListener('click', () => globeView.showAll());
 
 // --- Upload to server: distinct from the local-preview file-input/drag-drop above, which
-// loads bytes directly via globeView.loadLocalFile(File) and never touches the API. This
-// path POSTs to /api/models (single file) or /api/models/batch (multiple files, field
-// "files" repeated -- distinct filenames become distinct models per that endpoint's own
-// basename-grouping contract), then polls GET /api/models/{id} per created model until the
-// Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish) finishes
-// conversion, and only then loads the real published artifact via globeView.loadModelById(id).
-// If the source was an fbx+llh batch, the worker already wrote the georef from the LLH file
-// by the time status is 'ready' -- no manual "save georeference" step is needed here.
+// loads bytes directly via globeView.loadLocalFile(File) and never touches the API. Always
+// POSTs to /api/models/batch (field "files", repeated), even for a single file -- see
+// uploadFilesToServer's doc comment for why always using the batch endpoint (rather than
+// branching to a single-file POST /api/models) matters for correctly grouping an FBX with
+// an LLH file uploaded alongside it. Then polls GET /api/models/{id} per created model until
+// the Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish)
+// finishes conversion, and only then loads the real published artifact via
+// globeView.loadModelById(id), which reads back whatever georef the worker already wrote
+// from an LLH file in that same batch -- no manual "save georeference" step needed here.
 // Multiple models poll concurrently, independently.
 
 interface ModelRecord {
@@ -237,56 +238,40 @@ async function trackedPoll(modelId: string, label: string): Promise<void> {
   }
 }
 
-async function uploadToServer(file: File): Promise<void> {
-  appendLog(`uploading ${file.name} to server (POST /api/models)...`);
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await fetch('/api/models', { method: 'POST', body: formData });
-    if (!res.ok) {
-      appendLog(`upload ${file.name} failed: ${await describeError(res)}`);
-      return;
-    }
-    const record = (await res.json()) as ModelRecord;
-    appendLog(`upload ${file.name}: created model ${record.id}, status=${record.status}`);
-    await trackedPoll(record.id, record.id);
-  } catch (err) {
-    appendLog(`upload ${file.name} failed: ${(err as Error).message}`);
-  }
-}
-
-/** Multiple files selected at once -> POST /api/models/batch in a single request (field
- * "files", repeated), matching that endpoint's existing basename-grouping contract exactly
- * (distinct filenames become distinct models -- see server/api's own "two distinct
- * basenames..." test). The returned models are polled concurrently and independently; each
- * gets its own log lines prefixed by its name so the concurrent output doesn't read as one
- * confused stream. */
-async function uploadBatchToServer(files: File[]): Promise<void> {
-  appendLog(`uploading ${files.length} files to server (POST /api/models/batch)...`);
+/** Always POSTs to /api/models/batch (field "files", repeated) -- even for a single file --
+ * rather than branching to the single-file POST /api/models for that case. /api/models/batch
+ * groups by basename (server/api's own "two distinct basenames..." test), so an FBX
+ * uploaded alongside an LLH file with the same basename (e.g. "plant.fbx" + "plant.llh")
+ * is grouped into one model regardless of selection order; sending them as two separate
+ * single-file uploads instead would create two unrelated models and the LLH would never
+ * reach the worker as that FBX's georef source. The worker already parses an LLH file and
+ * writes its georef automatically (Phase 4) -- by the time a model's status is 'ready',
+ * loadModelById's GET .../georef already has it, with no extra "save georeference" step
+ * needed here. The returned models are polled concurrently and independently; each gets its
+ * own log lines prefixed by its name so concurrent output doesn't read as one confused
+ * stream. */
+async function uploadFilesToServer(files: File[]): Promise<void> {
+  appendLog(`uploading ${files.length} file(s) to server (POST /api/models/batch)...`);
   try {
     const formData = new FormData();
     for (const file of files) formData.append('files', file);
     const res = await fetch('/api/models/batch', { method: 'POST', body: formData });
     if (!res.ok) {
-      appendLog(`batch upload failed: ${await describeError(res)}`);
+      appendLog(`upload failed: ${await describeError(res)}`);
       return;
     }
     const records = (await res.json()) as ModelRecord[];
-    appendLog(`batch upload: created ${records.length} model(s) -- ${records.map((r) => r.name).join(', ')}`);
+    appendLog(`upload: created ${records.length} model(s) -- ${records.map((r) => r.name).join(', ')}`);
     await Promise.all(records.map((record) => trackedPoll(record.id, record.name)));
   } catch (err) {
-    appendLog(`batch upload failed: ${(err as Error).message}`);
+    appendLog(`upload failed: ${(err as Error).message}`);
   }
 }
 
 uploadBtn.addEventListener('click', () => uploadInput.click());
 uploadInput.addEventListener('change', () => {
   const files = uploadInput.files ? [...uploadInput.files] : [];
-  if (files.length === 1) {
-    void uploadToServer(files[0]!);
-  } else if (files.length > 1) {
-    void uploadBatchToServer(files);
-  }
+  if (files.length > 0) void uploadFilesToServer(files);
   uploadInput.value = ''; // allow re-selecting the same file name(s) in a row
 });
 uploadCancelBtn.addEventListener('click', () => {
