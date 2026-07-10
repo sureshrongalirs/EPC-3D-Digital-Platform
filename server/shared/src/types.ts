@@ -24,6 +24,8 @@ export interface ModelRow {
   created_at: string;
   error: string | null;
   source_files: string;
+  processing_started_at: string | null;
+  warnings: string | null;
 }
 
 export interface ModelDto {
@@ -38,6 +40,7 @@ export interface ModelDto {
   siteId: string | null;
   createdAt: string;
   error: string | null;
+  warnings: string[];
   sourceFiles: SourceFileRef[];
   artifactUrl: string | null;
 }

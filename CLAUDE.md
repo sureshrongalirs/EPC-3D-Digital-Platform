@@ -54,10 +54,10 @@ sign-off from the user — they encode hard-won constraints, not preferences.
   upload time, or via the interactive Map/Georeference plugin.
 - Rotation resolution precedence: (a) model-level override if set, (b) inherited from the
   model's site if the site has a saved rotation, (c) default 0° flagged for manual alignment.
-  Never silently guess a rotation. As of Phase 3, this precedence is resolved by whoever
-  WRITES a georef row, not by the reader, in one shared internal function
-  (`server/api/src/lib/rotationPrecedence.ts`'s `resolveRotation`) — the Phase 4 worker
-  must call this same function verbatim rather than reimplementing the precedence logic.
+  Never silently guess a rotation. This precedence is resolved by whoever WRITES a georef
+  row, not by the reader, in one shared function (`resolveRotation`, now in
+  `server/shared/src/lib/rotationPrecedence.ts` — extracted there in Phase 4 specifically so
+  the worker could call it verbatim; see the Repo layout and Phase status sections below).
 - Sites are a first-class entity: `rotation_deg`, `anchor_convention`, `height_datum` are
   site-level defaults; individual models can override without mutating the site. Propagating
   a model's rotation up to its site is an explicit user action ("save as site default"), never
@@ -77,6 +77,9 @@ sign-off from the user — they encode hard-won constraints, not preferences.
 │   ├── plugins/       @plantscope/plugins  — first-party plugins (core-facade consumers only)
 │   └── shared/        @plantscope/shared   — types/utilities shared across packages
 ├── server/
+│   ├── shared/        @plantscope/server-shared — DB layer (Database, migrations, repo/*,
+│   │                  publishRevision, resolveRotation) shared by api and worker; Node-only,
+│   │                  so it lives under server/, not packages/ (see Phase 4 note below)
 │   ├── api/           @plantscope/api      — Node API (pointers/metadata, publish transactions)
 │   └── worker/        @plantscope/worker   — conversion worker (FBX/.mdb2 → GLB or 3D Tiles)
 ├── apps/
@@ -101,9 +104,18 @@ sessions.
   against the Phase 1 facade only.
 - **Phase 3 (complete):** API server + Postgres — catalog, upload, zones/georef/components
   endpoints, Range-enabled static serving, atomic publish transaction.
-- **Phase 4 (next):** conversion worker — queue, assimp FBX→GLB, raw-binary FBX
-  Properties70/Linkage parser, `.mdb2` join, atomic publish integration.
-- **Phase 5 (not started):** OGC 3D Tiles path — worker tiling step, 3DTilesRendererJS in the
+- **Phase 4 (complete):** conversion worker — queue (`SELECT ... FOR UPDATE SKIP LOCKED`,
+  stall recovery, probe-based adaptive parallelism), FBX/GLB/mdb2/LLH format adapters (IFC/RVM
+  registered as explicit "not yet implemented" stubs), the raw-binary FBX Properties70/Linkage
+  parser (cross-verified against an independent Python ground-truth parser,
+  `scripts/fbx_linkage_check.py`), streamed mdb2 join + batched inserts, and atomic publish
+  integration. **Architectural note:** `publishRevision`/`resolveRotation`/the DB layer were
+  extracted out of `server/api` into a new `server/shared` package (`@plantscope/server-shared`)
+  so the worker could call them verbatim rather than duplicating the logic — see the Repo
+  layout section above. `packages/*` stays browser-safe (bundled into `apps/demo`); this new
+  code is Node-only and consumed only by `server/api` and `server/worker`, hence `server/shared`
+  rather than `packages/shared`.
+- **Phase 5 (next):** OGC 3D Tiles path — worker tiling step, 3DTilesRendererJS in the
   SDK, size-routed streaming for large models.
 - **Phase 6 (not started):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
   log, backup/restore runbook.

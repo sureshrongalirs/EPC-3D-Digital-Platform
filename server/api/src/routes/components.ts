@@ -1,8 +1,9 @@
 import { Router } from 'express';
 
-import type { Database } from '../db/index.js';
+import type { Database } from '@plantscope/server-shared';
+import { getComponent, toComponentDto } from '@plantscope/server-shared';
+
 import { badRequest, notFound } from '../lib/problem.js';
-import { getComponent, toComponentDto } from '../repo/components.js';
 
 export function createComponentsRouter(db: Database): Router {
   const router = Router();

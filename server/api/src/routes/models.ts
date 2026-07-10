@@ -4,14 +4,20 @@ import path from 'node:path';
 
 import { Router } from 'express';
 
+import type { Database, SourceFileRef } from '@plantscope/server-shared';
+import {
+  createModel,
+  deleteModel,
+  getModelRow,
+  listModelRows,
+  publishRevision,
+  recordAudit,
+  toModelDtoWithArtifact,
+} from '@plantscope/server-shared';
+
 import type { Config } from '../config.js';
-import type { Database } from '../db/index.js';
 import { badRequest, notFound } from '../lib/problem.js';
-import { publishRevision } from '../lib/publish.js';
 import { createUploadMiddleware, groupBatchFiles, validateUploadedFile, type UploadedFile } from '../lib/upload.js';
-import { recordAudit } from '../repo/audit.js';
-import { createModel, deleteModel, getModelRow, listModelRows, toModelDtoWithArtifact } from '../repo/models.js';
-import type { SourceFileRef } from '../types.js';
 
 function toRelativePath(dataDir: string, absolutePath: string): string {
   return path.relative(dataDir, absolutePath).split(path.sep).join('/');
@@ -109,6 +115,26 @@ export function createModelsRouter(db: Database, config: Config): Router {
     const row = await getModelRow(db, req.params.id);
     if (!row) throw notFound(`model ${req.params.id} not found`);
     res.json(await toModelDtoWithArtifact(db, row));
+  });
+
+  // GET /api/models/{id}/linkage-map — the FBX-recovered node-name -> Linkage-key sidecar
+  // (server/worker's fbxAdapter writes linkage-map.json alongside the GLB it publishes;
+  // see CLAUDE.md invariant #3 and the Phase 4 worker's pipeline.ts). 404 if the model's
+  // current revision has no such sidecar (e.g. it was never an FBX source, or none of its
+  // Model nodes had a "Linkages" property).
+  router.get('/models/:id/linkage-map', async (req, res) => {
+    const row = await getModelRow(db, req.params.id);
+    if (!row) throw notFound(`model ${req.params.id} not found`);
+    if (row.current_revision === null) throw notFound(`model ${req.params.id} has no published revision`);
+
+    const sidecarPath = path.join(config.modelsArtifactsDir, row.id, String(row.current_revision), 'linkage-map.json');
+    let raw: string;
+    try {
+      raw = await fsp.readFile(sidecarPath, 'utf8');
+    } catch {
+      throw notFound(`no linkage map for model ${req.params.id}`);
+    }
+    res.type('application/json').send(raw);
   });
 
   // DELETE /api/models/{id} — remove files + rows.

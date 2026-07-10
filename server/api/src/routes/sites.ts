@@ -2,10 +2,10 @@ import crypto from 'node:crypto';
 
 import { Router } from 'express';
 
-import type { Database } from '../db/index.js';
+import type { Database } from '@plantscope/server-shared';
+import { createSite, getSiteRow, listSiteRows, recordAudit, toSiteDto, updateSiteRotation } from '@plantscope/server-shared';
+
 import { badRequest, notFound } from '../lib/problem.js';
-import { recordAudit } from '../repo/audit.js';
-import { createSite, getSiteRow, listSiteRows, toSiteDto, updateSiteRotation } from '../repo/sites.js';
 
 export function createSitesRouter(db: Database): Router {
   const router = Router();

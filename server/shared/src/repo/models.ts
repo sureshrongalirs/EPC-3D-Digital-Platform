@@ -15,6 +15,7 @@ export function toModelDto(row: ModelRow, artifactUrl: string | null): ModelDto 
     siteId: row.site_id,
     createdAt: String(row.created_at),
     error: row.error,
+    warnings: parseJsonColumn<string[]>(row.warnings) ?? [],
     sourceFiles: parseJsonColumn<SourceFileRef[]>(row.source_files) ?? [],
     artifactUrl,
   };
