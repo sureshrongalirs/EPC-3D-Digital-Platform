@@ -27,6 +27,7 @@ async function makeConfig(dataDir: string): Promise<Config> {
     largeJobMb: 250,
     sizeThresholdMb: 100,
     pollIntervalMs: 1000,
+    dracoForCesium: false,
   };
 }
 

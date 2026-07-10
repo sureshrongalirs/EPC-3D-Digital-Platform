@@ -54,8 +54,16 @@ export const fbxAdapter: FormatAdapter = {
       );
     }
 
-    await compressWithDraco(rawGlbPath, finalGlbPath);
-    await fsp.rm(rawGlbPath, { force: true });
+    if (ctx.dracoForCesium) {
+      await compressWithDraco(rawGlbPath, finalGlbPath);
+      await fsp.rm(rawGlbPath, { force: true });
+    } else {
+      // Default: skip Draco entirely (see Config.dracoForCesium's doc comment) -- Cesium's
+      // built-in decoder hangs silently on this encoder's output, so an uncompressed GLB is
+      // what actually renders. assimp already wrote the exported GLB to rawGlbPath; just
+      // rename it into place rather than a redundant read+write copy.
+      await fsp.rename(rawGlbPath, finalGlbPath);
+    }
 
     const fbxBuffer = await fsp.readFile(sourceFile.absolutePath);
     const linkageMap = parseFBXLinkages(fbxBuffer);
