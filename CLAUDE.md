@@ -87,16 +87,23 @@ plugin — do not misread this as bending or breaking invariant #1.
 - It depends on `@plantscope/shared` for types only (`GeorefRecord`, `ModelInfo`-shaped DTOs,
   etc.) and reads the **same catalog/georef REST API** (`GET /api/models/{id}`,
   `GET /api/models/{id}/georef`) that `MapGeorefPlugin` and the three.js `Viewer` already
-  use — there is exactly one source of truth for a model's placement (the `georefs` table),
-  rendered by two independent, complementary views (apps/demo wires a tab/toggle between
-  them; neither replaces the other).
+  use — there is exactly one source of truth for a model's placement (the `georefs` table).
 - Its only structural link to the three.js side is data, never code: it loads the same
   published GLB artifact (`ModelDto.artifactUrl`) that `Viewer.loadModel` loads, and re-derives
   a placement transform from the same `GeorefRecord` fields (`anchorLat`/`anchorLon`/`height`/
   `rotationDeg`/`anchorConvention`) that `MapGeorefPlugin`'s 2D map already visualizes — see
   `packages/globe-view/src/transform.ts` for the plant-local → ECEF math, which deliberately
   mirrors `@plantscope/shared`'s existing `localToLatLon`'s rotation convention (rotationDeg =
-  degrees clockwise from north) so the two views never disagree about which way "rotated" points.
+  degrees clockwise from north) so the two never disagree about which way "rotated" points.
+- **apps/demo currently uses only the globe view.** An earlier version wired a 2D Map/Georef
+  ↔ 3D Globe tab toggle (both views side by side); the three.js `Viewer`, its plugins
+  (`ZonesPlugin`/`MapGeorefPlugin`/`LinkageMetadataPlugin`), and the tab-switching UI were
+  later removed from `apps/demo` entirely so the globe is the app's only, primary view — see
+  its own git history for that change. `@plantscope/core` and `@plantscope/plugins` are
+  untouched and remain valid for any other consumer; `apps/demo` simply isn't one anymore.
+  A model with no georef record is still shown (not left unplaced) at a clearly-labeled
+  default location (`GlobeView.DEFAULT_FALLBACK_ANCHOR`, Hyderabad) rather than refusing to
+  render it.
 - Terrain/imagery defaults to Cesium Ion's hosted assets for developer convenience (that is a
   real, currently-unavoidable exception to invariant #7's "no cloud provider dependency" for
   the *default* dev experience — see `packages/globe-view`'s `GlobeProviderConfig` and its
