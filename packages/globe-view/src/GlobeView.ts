@@ -136,14 +136,33 @@ export class GlobeView {
     this.viewer.scene.primitives.add(cesiumModel);
     this.currentModel = cesiumModel;
 
+    // fromGltfAsync's promise resolves once the Model object exists, NOT once it's ready
+    // to render -- `ready`/`boundingSphere` etc. only become valid on a later render-loop
+    // tick, after the primitive above has actually been drawn at least once. Reading
+    // boundingSphere before that throws "The model is not loaded. Use Model.readyEvent or
+    // wait for Model.ready to be true." (this was happening on every load, logged
+    // repeatedly). Must wait for readyEvent -- but also handle the (real, documented)
+    // possibility that ready is already true by the time we get here, since readyEvent
+    // only fires once and we'd otherwise hang forever waiting for an event that already
+    // happened.
+    await this.waitUntilModelReady(cesiumModel);
+
     const statusLabel = describeGeorefStatus(georef);
     this.setStatus(`"${model.name}": ${statusLabel}`);
 
-    // fromGltfAsync's promise already resolves only once the model is ready to render
-    // (per its own JSDoc), so boundingSphere is safe to read immediately here.
     this.viewer.camera.flyToBoundingSphere(cesiumModel.boundingSphere, { duration: 1.5 });
 
     return { kind: 'placed', statusLabel, georef };
+  }
+
+  private waitUntilModelReady(model: Cesium.Model): Promise<void> {
+    if (model.ready) return Promise.resolve();
+    return new Promise((resolve) => {
+      const removeListener = model.readyEvent.addEventListener(() => {
+        removeListener();
+        resolve();
+      });
+    });
   }
 
   private clearModel(): void {
