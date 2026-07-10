@@ -1,5 +1,12 @@
-export { GlobeView, type GlobeLoadResult, type GlobeViewOptions } from './GlobeView.js';
+export {
+  DEFAULT_FALLBACK_ANCHOR,
+  GlobeView,
+  type GlobeLoadResult,
+  type GlobeViewOptions,
+  type PickedNodeInfo,
+} from './GlobeView.js';
 export { describeGeorefStatus, type GeorefStatusInput } from './georefStatus.js';
+export { parseGlbNodeNames } from './glbNodeNames.js';
 export {
   createTerrainAndImageryProviders,
   resolveProviderConfig,
