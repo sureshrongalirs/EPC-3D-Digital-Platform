@@ -5,7 +5,7 @@ import type { GeorefRecord } from '@plantscope/shared';
 import { describeGeorefStatus } from './georefStatus.js';
 import { parseGlbNodeNames } from './glbNodeNames.js';
 import { createTerrainAndImageryProviders, resolveProviderConfig, type GlobeProviderConfig } from './providerConfig.js';
-import { computeGlobeModelMatrix, type GlobeTransformInput, type ModelCentroid } from './transform.js';
+import { computeGlobeModelMatrix, type ModelCentroid } from './transform.js';
 
 export interface GlobeViewOptions {
   /** Base URL prefix for REST calls (e.g. `/api/models/{id}`); defaults to '' (relative,
@@ -43,56 +43,21 @@ interface ComponentResponse {
 }
 
 export type GlobeLoadResult =
-  | { kind: 'placed'; statusLabel: string; georef: GeorefRecord | null }
+  | { kind: 'placed'; statusLabel: string; georef: GeorefRecord }
+  | { kind: 'no-location' }
   | { kind: 'not-ready'; status: 'queued' | 'processing' | 'failed' };
 
-/** Hyderabad, Telangana, India -- used only when a model has no georef record at all, so
- * there is still somewhere sensible to show it rather than nowhere. Always clearly labeled
- * as a default (see DEFAULT_FALLBACK_LABEL below), never presented as if it were a real,
- * surveyed placement -- same principle as describeGeorefStatus's method='assumed' handling. */
-export const DEFAULT_FALLBACK_ANCHOR: GlobeTransformInput = {
-  anchorLat: 17.385044,
-  anchorLon: 78.486671,
-  height: 520.35,
-  rotationDeg: 0,
-  anchorConvention: 'model_origin',
-};
-const DEFAULT_FALLBACK_LABEL = 'default location -- no LLH file provided';
+/** Shown (via onStatus) whenever a model has no georef record -- no LLH file was uploaded
+ * with it, and nothing has been saved via the Map/Georeference view either. There is no
+ * fallback location: an earlier version of this placed such a model at a fixed
+ * (Hyderabad) coordinate, which was just a placeholder and not a real position for any
+ * given model -- silently rendering it there would misrepresent an unplaced model as a
+ * real, surveyed one. Camera flies home to the whole-Earth view instead (see flyHome() in
+ * loadModelById/loadLocalFile below) so there's at least something meaningful on screen. */
+const NO_LOCATION_MESSAGE = 'No location set -- upload an LLH file with your FBX to place this model on the globe.';
 
 interface CesiumPickResult {
   detail?: { node?: { name?: string } };
-}
-
-/**
- * Replaces `input.height` with the real ground height Cesium's terrain provider reports at
- * that lat/lon. Without this, a model placed at a georef's raw height (or the fixed
- * DEFAULT_FALLBACK_ANCHOR height) sinks underground the moment real terrain data loads at a
- * given viewing distance: a georef's height is frequently 0 or an uncalibrated estimate
- * (CLAUDE.md never assumes a height datum is meaningful -- height_datum is tagged 'unknown'
- * unless stated), and even a real height is measured against an ellipsoid or sea-level
- * datum that rarely matches Cesium World Terrain's actual elevation at that exact point.
- * From far away the terrain is coarse low-resolution geometry, so a few dozen meters of
- * mismatch isn't visible; zooming in loads high-detail terrain and the model, still sitting
- * at its old height, ends up literally inside the ground and gets occluded -- this was the
- * reported "model disappears when zooming in" bug. sampleTerrainMostDetailed() queries the
- * terrain provider directly (not "whatever happens to be rendered right now"), so it works
- * regardless of current camera position. Falls back to the original height if sampling
- * fails (e.g. no terrain provider ever loaded -- see setupProviders' catch branch) rather
- * than throwing, since a mis-elevated-but-visible model beats a hard failure.
- */
-async function clampToGroundHeight(viewer: Cesium.Viewer, input: GlobeTransformInput): Promise<GlobeTransformInput> {
-  try {
-    const [sampled] = await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, [
-      Cesium.Cartographic.fromDegrees(input.anchorLon, input.anchorLat),
-    ]);
-    if (sampled && Number.isFinite(sampled.height)) {
-      return { ...input, height: sampled.height };
-    }
-  } catch {
-    // Terrain sampling failing (e.g. an EllipsoidTerrainProvider with no real tile
-    // availability, or a network hiccup) isn't fatal -- fall through to the original height.
-  }
-  return input;
 }
 
 function computeCentroid(bboxMin: [number, number, number] | null, bboxMax: [number, number, number] | null): ModelCentroid | undefined {
@@ -205,9 +170,9 @@ export class GlobeView {
 
   /**
    * Loads a model's published GLB artifact (the same artifact @plantscope/core's
-   * Viewer.loadModel loads) and places it using its georef record if one exists, or
-   * DEFAULT_FALLBACK_ANCHOR (clearly labeled) if not -- a ready model is always shown
-   * somewhere once it's ready, never left unplaced just because no LLH/georef was provided.
+   * Viewer.loadModel loads) and places it using its georef record. If the model has no
+   * georef (no LLH file uploaded and nothing saved via Map/Georeference), it is never placed
+   * at a fake location -- see NO_LOCATION_MESSAGE.
    */
   async loadModelById(modelId: string): Promise<GlobeLoadResult> {
     await this.providersReady;
@@ -224,20 +189,17 @@ export class GlobeView {
     }
 
     const georefRes = await fetch(`${this.apiBaseUrl}/api/models/${modelId}/georef`);
-    let georef: GeorefRecord | null = null;
-    let statusLabel: string;
     if (georefRes.status === 404) {
-      statusLabel = DEFAULT_FALLBACK_LABEL;
-    } else if (!georefRes.ok) {
-      throw new Error(`GET /api/models/${modelId}/georef failed: ${georefRes.status}`);
-    } else {
-      georef = (await georefRes.json()) as GeorefRecord;
-      statusLabel = describeGeorefStatus(georef);
+      this.onStatus(`"${model.name}": ${NO_LOCATION_MESSAGE}`);
+      this.viewer.camera.flyHome(1.5);
+      return { kind: 'no-location' };
     }
+    if (!georefRes.ok) throw new Error(`GET /api/models/${modelId}/georef failed: ${georefRes.status}`);
+    const georef = (await georefRes.json()) as GeorefRecord;
+    const statusLabel = describeGeorefStatus(georef);
 
     const centroid = computeCentroid(model.bboxMin, model.bboxMax);
-    const groundClampedAnchor = await clampToGroundHeight(this.viewer, georef ?? DEFAULT_FALLBACK_ANCHOR);
-    const modelMatrix = computeGlobeModelMatrix(groundClampedAnchor, centroid);
+    const modelMatrix = computeGlobeModelMatrix(georef, centroid);
 
     const artifactUrl = `${this.apiBaseUrl}${model.artifactUrl}`;
     const buffer = await (await fetch(artifactUrl)).arrayBuffer();
@@ -249,20 +211,18 @@ export class GlobeView {
 
   /**
    * Loads a local .glb file directly (no server round-trip, no catalog id, no component
-   * lookups on pick). There is no georef possible for an arbitrary local file, so it always
-   * uses the default fallback location, labeled the same way as a server-backed model with
-   * no georef.
+   * lookups on pick). A local file has no possible georef -- there is nowhere real to place
+   * it, and (per this package's policy of never rendering a model at a fake location) it is
+   * not rendered on the globe at all; this just reports NO_LOCATION_MESSAGE and shows the
+   * whole-Earth view, same as a server-backed model with no georef.
    */
   async loadLocalFile(file: File): Promise<void> {
     await this.providersReady;
     this.clearModel();
     this.currentModelId = null;
 
-    const buffer = await file.arrayBuffer();
-    const groundClampedAnchor = await clampToGroundHeight(this.viewer, DEFAULT_FALLBACK_ANCHOR);
-    const modelMatrix = computeGlobeModelMatrix(groundClampedAnchor);
-    await this.placeModelFromBytes(buffer, modelMatrix);
-    this.onStatus(`"${file.name}": ${DEFAULT_FALLBACK_LABEL} (local preview)`);
+    this.onStatus(`"${file.name}": ${NO_LOCATION_MESSAGE}`);
+    this.viewer.camera.flyHome(1.5);
   }
 
   private async placeModelFromBytes(buffer: ArrayBuffer, modelMatrix: Cesium.Matrix4): Promise<void> {
@@ -274,10 +234,30 @@ export class GlobeView {
       // artificially shrink/grow a model based on camera distance unless explicitly
       // configured to -- neither was set here, so LOD-driven scaling was checked and ruled
       // out as a cause of the "model disappears when zooming in" bug (that turned out to be
-      // clampToGroundHeight's absence, above). minimumPixelSize is still passed explicitly
-      // (rather than left implicit) so this is verifiable at a glance rather than relying on
-      // Cesium's default matching what we want.
-      const cesiumModel = await Cesium.Model.fromGltfAsync({ url: blobUrl, modelMatrix, minimumPixelSize: 0 });
+      // terrain occlusion -- see heightReference below). minimumPixelSize is still passed
+      // explicitly (rather than left implicit) so this is verifiable at a glance rather
+      // than relying on Cesium's default matching what we want.
+      //
+      // heightReference/scene: a model placed at a fixed height (from a georef's raw
+      // height, frequently 0 or otherwise uncalibrated against Cesium World Terrain's
+      // actual elevation -- CLAUDE.md never assumes a height datum is meaningful) sinks
+      // underground the moment high-detail terrain streams in at close zoom, since that
+      // terrain doesn't match the fixed height at all. A one-time sampleTerrainMostDetailed()
+      // call (this package's earlier approach) wasn't reliable enough -- it only samples
+      // whatever terrain LOD is available *at that moment*, not whatever loads in later as
+      // the camera moves. CLAMP_TO_GROUND instead has Cesium re-clamp the model to the
+      // terrain surface every frame, automatically tracking terrain as it streams in at
+      // higher detail, so the model is never underground regardless of zoom level. `scene`
+      // must be supplied for `heightReference` to take effect at all (undocumented
+      // requirement, easy to miss: Cesium's own JSDoc for Model.fromGltfAsync notes this).
+      const cesiumModel = await Cesium.Model.fromGltfAsync({
+        url: blobUrl,
+        modelMatrix,
+        minimumPixelSize: 0,
+        scene: this.viewer.scene,
+      });
+      cesiumModel.heightReference = Cesium.HeightReference.CLAMP_TO_GROUND;
+
       this.viewer.scene.primitives.add(cesiumModel);
       this.currentModel = cesiumModel;
 
@@ -291,7 +271,13 @@ export class GlobeView {
       // investigation, point (b).
       console.log(`GlobeView: model boundingSphere radius = ${cesiumModel.boundingSphere.radius}m`);
 
-      this.viewer.camera.flyToBoundingSphere(cesiumModel.boundingSphere, { duration: 1.5 });
+      // A wide offset (3x the model's own radius back and slightly above) gives a good
+      // viewing angle directly above/around the model rather than flying in so close the
+      // model fills (or exceeds) the whole viewport.
+      this.viewer.camera.flyToBoundingSphere(cesiumModel.boundingSphere, {
+        duration: 2,
+        offset: new Cesium.HeadingPitchRange(0, -0.5, cesiumModel.boundingSphere.radius * 3),
+      });
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
