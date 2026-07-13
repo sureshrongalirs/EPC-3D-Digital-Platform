@@ -27,3 +27,27 @@ export async function getComponent(
     .orderBy('revision', 'desc')
     .first();
 }
+
+export interface ComponentBbox {
+  linkageKey: string;
+  bboxMin: [number, number, number] | null;
+  bboxMax: [number, number, number] | null;
+}
+
+/** GET /api/components?model={id}&fields=bbox -- every component's bbox for one model
+ * revision in a single query, used by @plantscope/core's Viewer to compute
+ * getObjectScreenCentroids() for OGC 3D Tiles models (whose objects may span tiles that
+ * aren't currently loaded/streamed in, so their centroids can't be read off any live
+ * three.js geometry the way the GLB path does -- see CLAUDE.md invariant #4). */
+export async function listComponentBboxesByModel(db: Database, modelId: string, revision: number): Promise<ComponentBbox[]> {
+  const rows = await db
+    .knex<ComponentRow>('components')
+    .where({ model_id: modelId, revision })
+    .select('linkage_key', 'bbox_min', 'bbox_max');
+
+  return rows.map((row) => ({
+    linkageKey: row.linkage_key,
+    bboxMin: parseBbox(row.bbox_min),
+    bboxMax: parseBbox(row.bbox_max),
+  }));
+}

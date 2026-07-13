@@ -43,6 +43,10 @@ export interface ModelDto {
   warnings: string[];
   sourceFiles: SourceFileRef[];
   artifactUrl: string | null;
+  /** null until a revision is published (mirrors artifactUrl's own null-until-published
+   * lifecycle) -- lets @plantscope/core's Viewer.loadModel() route between GLTFLoader and
+   * the OGC 3D Tiles renderer without guessing from the URL's extension. */
+  artifactType: ArtifactType | null;
 }
 
 export interface RevisionRow {

@@ -21,6 +21,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "3d-tiles-renderer": "^0.4.28",
     "@plantscope/shared": "workspace:*",
     "three": "^0.185.1"
   },

@@ -47,7 +47,7 @@ export {
   upsertGeoref,
   type UpsertGeorefInput,
 } from './repo/georef.js';
-export { getComponent, toComponentDto } from './repo/components.js';
+export { getComponent, listComponentBboxesByModel, toComponentDto, type ComponentBbox } from './repo/components.js';
 export {
   deleteZone,
   getZoneMembers,

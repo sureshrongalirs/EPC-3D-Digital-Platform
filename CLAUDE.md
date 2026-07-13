@@ -164,14 +164,43 @@ sessions.
   layout section above. `packages/*` stays browser-safe (bundled into `apps/demo`); this new
   code is Node-only and consumed only by `server/api` and `server/worker`, hence `server/shared`
   rather than `packages/shared`.
-- **Phase 5 (next):** OGC 3D Tiles path — worker tiling step, 3DTilesRendererJS in the
-  SDK, size-routed streaming for large models.
-- **Phase 6 (not started):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
+- **Phase 5 (complete):** OGC 3D Tiles path — worker tiling step (`server/worker/src/adapters/tiles/`:
+  `mago-3d-tiler`, a Java 21+ CLI tool with no npm package, invoked as a child process the
+  same way `assimp` already is — see `magoTiler.ts`'s doc comment for why a per-job Docker
+  container invocation was ruled out, and `server/worker/Dockerfile` for how the jar + a
+  portable Eclipse Temurin JRE get baked into the worker's own image at build time), 3D Tiles
+  rendering in `@plantscope/core` via `3d-tiles-renderer`'s `TilesRenderer` (rendered into the
+  *same* three.js scene/camera as the GLB path — see `Viewer.ts`'s `loadTilesModel()`),
+  size-routed streaming for large models (`fbxAdapter.convert()` picks GLB vs. tiles by
+  comparing the source file's size against `sizeThresholdMb`, both branches sharing the same
+  assimp export step). `ModelDto.artifactType` (`'glb' | 'tiles' | null`) is what
+  `Viewer.loadModel()` actually routes on — callers never choose or see which backend loaded.
+  Tiled picking resolves through the linkage-map sidecar (`GET /api/models/{id}/linkage-map`)
+  rather than the GLB path's O(log n) triangle-range resolver, since tiles have no stable
+  contiguous index ranges; tiled `getObjectScreenCentroids()` reads component bboxes (`GET
+  /api/components?model={id}&fields=bbox`) instead of live scene geometry, since an object's
+  tile may not currently be streamed in. **Known gap, not silently glossed over:**
+  `mago-3d-tiler` does not apply Draco compression natively (confirmed against its own docs)
+  and per-tile Draco re-compression (rewriting the b3dm binary container) was left
+  unimplemented since there was no real `mago-3d-tiler` output available in the environment
+  this was built in to validate it against — the ≤8MB-per-tile budget is enforced for real,
+  just via triangle-count-driven LOD depth rather than compression. HDR image-based lighting
+  (`packages/core/assets/studio_small_09_1k.hdr`, via three.js's `HDRLoader`) was folded into
+  this phase since it touched the same `Viewer.ts` constructor.
+- **Phase 6 (next):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
   log, backup/restore runbook.
 - **Phase 7 (not started):** E2E tests, validation harness, load testing.
 
 **Out-of-sequence addition (complete), not part of the numbered list above:**
 `@plantscope/globe-view` — a CesiumJS 3D globe view, a sibling rendering surface to
 `@plantscope/core`'s three.js `Viewer` (see "Rendering surfaces" above). Built independently
-of the Phase 0–7 roadmap; in particular it does **not** depend on, and is not the same thing
-as, the still-not-started Phase 5 (OGC 3D Tiles).
+of the Phase 0–7 roadmap, before Phase 5 (OGC 3D Tiles) existed; **currently disabled in
+`apps/demo`** (the three.js `Viewer` is that app's active view again — see its own git
+history), not deleted. It's ready to be re-enabled now that Phase 5 tiles are real: when it
+is, `@plantscope/globe-view`'s model loading should prefer a model's tiles artifact over its
+GLB artifact for large models (mirroring `@plantscope/core`'s own `ModelDto.artifactType`
+routing) rather than always loading the GLB the way it did before Phase 5 existed — Cesium's
+own tileset loading (`Cesium3DTileset`) is the natural fit there, analogous to
+`3d-tiles-renderer`'s `TilesRenderer` on the three.js side, though the two renderers'
+tiles-loading code remains entirely separate per this section's own "only structural link is
+data, never code" rule.
