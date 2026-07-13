@@ -1,8 +1,8 @@
 import type { Database } from '../db/index.js';
 import { parseBbox, parseJsonColumn, serializeJsonColumn } from '../lib/json.js';
-import type { ModelDto, ModelRow, RevisionRow, SourceFileRef } from '../types.js';
+import type { ArtifactType, ModelDto, ModelRow, RevisionRow, SourceFileRef } from '../types.js';
 
-export function toModelDto(row: ModelRow, artifactUrl: string | null): ModelDto {
+export function toModelDto(row: ModelRow, artifactUrl: string | null, artifactType: ArtifactType | null = null): ModelDto {
   return {
     id: row.id,
     name: row.name,
@@ -18,6 +18,7 @@ export function toModelDto(row: ModelRow, artifactUrl: string | null): ModelDto 
     warnings: parseJsonColumn<string[]>(row.warnings) ?? [],
     sourceFiles: parseJsonColumn<SourceFileRef[]>(row.source_files) ?? [],
     artifactUrl,
+    artifactType,
   };
 }
 
@@ -69,7 +70,20 @@ export async function getArtifactPath(
   return row?.artifact_path ?? null;
 }
 
+async function getArtifactRevision(
+  db: Database,
+  modelId: string,
+  revision: number | null,
+): Promise<Pick<RevisionRow, 'artifact_path' | 'artifact_type'> | undefined> {
+  if (revision === null) return undefined;
+  return db.knex<RevisionRow>('revisions').where({ model_id: modelId, revision }).first();
+}
+
 export async function toModelDtoWithArtifact(db: Database, row: ModelRow): Promise<ModelDto> {
-  const artifactPath = await getArtifactPath(db, row.id, row.current_revision);
-  return toModelDto(row, artifactPath ? `/files/${artifactPath}` : null);
+  const revisionRow = await getArtifactRevision(db, row.id, row.current_revision);
+  return toModelDto(
+    row,
+    revisionRow ? `/files/${revisionRow.artifact_path}` : null,
+    revisionRow?.artifact_type ?? null,
+  );
 }
