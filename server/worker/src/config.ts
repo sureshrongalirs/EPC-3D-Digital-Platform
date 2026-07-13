@@ -40,7 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     parallelism: Number(env['WORKER_PARALLELISM'] ?? '2'),
     stallTimeoutMs: Number(env['WORKER_STALL_TIMEOUT_MS'] ?? String(10 * 60 * 1000)),
     largeJobMb: Number(env['WORKER_LARGE_JOB_MB'] ?? '250'),
-    sizeThresholdMb: Number(env['SIZE_THRESHOLD_MB'] ?? '100'),
+    sizeThresholdMb: Number(env['SIZE_THRESHOLD_MB'] ?? '50'),
     pollIntervalMs: Number(env['WORKER_POLL_INTERVAL_MS'] ?? '2000'),
     dracoForCesium: env['WORKER_DRACO_FOR_CESIUM'] === 'true',
   };
