@@ -10,7 +10,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
-import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 
 import { createPanelSlot, createToolbarSlot } from './internal/domSlots';
@@ -43,11 +42,6 @@ interface ObjectRecord extends SceneObjectRecord {
 // The host app is responsible for serving three's examples/jsm/libs/draco/ contents at
 // this path — apps/demo does so from public/draco/.
 const DRACO_DECODER_PATH = '/draco/';
-
-// Same convention as DRACO_DECODER_PATH above: a local, static file the host app is
-// responsible for serving at this path (see packages/core/assets/ -- apps/demo copies it to
-// public/environment/). CC0, sourced from Poly Haven (see packages/core/assets/README.md).
-const HDR_ENVIRONMENT_PATH = '/environment/studio_small_09_1k.hdr';
 
 // mago-3d-tiler's b3dm tile content is loaded through this same loader/manager pairing so
 // DRACO decompression works for tiled content too (three.js's own DRACOLoader, not Cesium's
@@ -164,7 +158,6 @@ export class Viewer {
   // Fetched once per tiles model load (not per-pick/per-frame) -- see loadTilesModel().
   private tiledLinkageMap: LinkageMapResponse | null = null;
   private tiledComponentCentroids: Map<string, THREE.Vector3> | null = null;
-  private hdrEnvironmentTexture: THREE.Texture | null = null;
 
   constructor(container: string | HTMLElement, opts: ViewerOptions = {}) {
     this.container = resolveContainer(container);
@@ -174,15 +167,10 @@ export class Viewer {
     this.container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    // Direct lights stay regardless of HDR outcome below -- they're what actually lights a
-    // model if the HDR fails to load (network hiccup, host app not serving
-    // HDR_ENVIRONMENT_PATH yet, etc.), and image-based lighting from an HDR environment map
-    // is additive/complementary to them (reflections/ambient fill), not a replacement.
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
     const sun = new THREE.DirectionalLight(0xffffff, 1.5);
     sun.position.set(5, 10, 7.5);
     this.scene.add(sun);
-    this.loadHdrEnvironment();
 
     const { width, height } = this.getContainerSize();
     this.camera = new THREE.PerspectiveCamera(60, width / height, 0.01, 10000);
@@ -457,7 +445,6 @@ export class Viewer {
     this.controls.dispose();
     this.dracoLoader.dispose();
     this.highlightMaterial.dispose();
-    this.hdrEnvironmentTexture?.dispose();
     this.renderer.dispose();
     this.container.replaceChildren();
 
@@ -725,38 +712,6 @@ export class Viewer {
     // Screen-space-error-driven LOD depends on viewport resolution -- must be refreshed on
     // resize, not just at load time.
     this.tilesRenderer?.setResolutionFromRenderer(this.camera, this.renderer);
-  }
-
-  /** Image-based lighting from a small (1k) HDR environment map (see HDR_ENVIRONMENT_PATH's
-   * doc comment) -- closes the visual gap vs. tools that default to IBL. Runs async, off the
-   * constructor's critical path; the existing hemisphere+directional lights already light the
-   * scene on their own, so a failed/slow load just means this never resolves and the scene
-   * looks exactly as it did before this feature existed -- never a thrown error, never a
-   * blocked/delayed Viewer construction. */
-  private loadHdrEnvironment(): void {
-    const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
-    pmremGenerator.compileEquirectangularShader();
-
-    new HDRLoader().load(
-      HDR_ENVIRONMENT_PATH,
-      (hdrTexture) => {
-        if (this.disposed) {
-          hdrTexture.dispose();
-          pmremGenerator.dispose();
-          return;
-        }
-        const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
-        this.scene.environment = envMap;
-        this.hdrEnvironmentTexture = envMap;
-        hdrTexture.dispose();
-        pmremGenerator.dispose();
-      },
-      undefined,
-      (err) => {
-        console.warn(`Viewer: HDR environment map failed to load from "${HDR_ENVIRONMENT_PATH}" -- falling back to the existing hemisphere/directional lights only.`, err);
-        pmremGenerator.dispose();
-      },
-    );
   }
 
   private getContainerSize(): { width: number; height: number } {
