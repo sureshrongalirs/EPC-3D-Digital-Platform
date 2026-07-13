@@ -38,13 +38,16 @@ importers:
 
   apps/demo:
     dependencies:
-      '@plantscope/globe-view':
+      '@plantscope/core':
         specifier: workspace:*
-        version: link:../../packages/globe-view
+        version: link:../../packages/core
+      '@plantscope/plugins':
+        specifier: workspace:*
+        version: link:../../packages/plugins
+      '@plantscope/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
     devDependencies:
-      cesium:
-        specifier: ^1.143.0
-        version: 1.143.0
       vite:
         specifier: ^6.0.5
         version: 6.4.3(@types/node@22.20.0)(tsx@4.23.0)(yaml@2.9.0)

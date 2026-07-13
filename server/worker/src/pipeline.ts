@@ -75,6 +75,7 @@ export async function processJob(db: Database, config: Config, logger: Logger, m
     sourceFiles: resolvedFiles,
     outDir,
     dataDir: config.dataDir,
+    dracoForCesium: config.dracoForCesium,
   };
 
   const warnings: string[] = [];

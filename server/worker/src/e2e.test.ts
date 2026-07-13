@@ -73,6 +73,7 @@ describe.skipIf(!assimpAvailable)('E2E: FBX -> GLB -> linkage map -> catalog (sk
         largeJobMb: 250,
         sizeThresholdMb: 100,
         pollIntervalMs: 1000,
+        dracoForCesium: false,
       };
 
       const modelId = 'e2e-model';

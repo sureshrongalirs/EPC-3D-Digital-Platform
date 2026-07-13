@@ -6,7 +6,12 @@ import { draco } from '@gltf-transform/functions';
 import draco3d from 'draco3dgltf';
 
 /**
- * Draco-compresses a GLB in place (reads inputPath, writes outputPath).
+ * Draco-compresses a GLB in place (reads inputPath, writes outputPath). Only called when
+ * Config.dracoForCesium is true (see its doc comment in config.ts) -- @plantscope/globe-view's
+ * Cesium.Model hangs silently (model.ready never becomes true) decoding this encoder's output,
+ * a version/encoding mismatch with Cesium's bundled decoder, so this is opt-in rather than
+ * the default for the single-GLB path. Not affected: the OGC 3D Tiles path (Phase 5, not yet
+ * built), where tile size is critical and this is expected to be the default once enabled.
  *
  * Chose gltf-transform + draco3dgltf over gltfpack for this: gltfpack is a separate native
  * binary (a second Docker-image dependency, on top of assimp/mdbtools) with its own platform

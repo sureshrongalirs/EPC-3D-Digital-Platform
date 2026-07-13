@@ -22,6 +22,9 @@ export interface ConvertContext {
    * DATA_DIR/models/artifacts/{modelId}/{revision}/ (see config.ts's modelsArtifactsDir). */
   outDir: string;
   dataDir: string;
+  /** See config.ts's Config.dracoForCesium doc comment -- the fbx adapter reads this to
+   * decide whether to Draco-compress its GLB output. */
+  dracoForCesium: boolean;
 }
 
 export interface ConvertResult {

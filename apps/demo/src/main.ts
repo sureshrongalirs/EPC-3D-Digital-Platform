@@ -1,4 +1,8 @@
-import { GlobeView, type PickedNodeInfo } from '@plantscope/globe-view';
+import type { PickResult } from '@plantscope/core';
+import { Viewer } from '@plantscope/core';
+import { createLinkageMetadataPlugin, createMapGeorefPlugin, createZonesPlugin } from '@plantscope/plugins';
+
+import { linkageKeyByNodeName, mockLabelIndex } from './mockData';
 
 interface ModelSummary {
   id: string;
@@ -13,8 +17,7 @@ function required<T extends Element>(selector: string): T {
   return el;
 }
 
-const globeContainer = required<HTMLDivElement>('#globe-container');
-const propertiesPanel = required<HTMLDivElement>('#properties-panel');
+const viewerContainer = required<HTMLDivElement>('#viewer');
 const fileInput = required<HTMLInputElement>('#file-input');
 const fitBtn = required<HTMLButtonElement>('#fit-btn');
 const isolateBtn = required<HTMLButtonElement>('#isolate-btn');
@@ -29,61 +32,52 @@ function appendLog(message: string): void {
   log.textContent = `${time}  ${message}\n${log.textContent ?? ''}`;
 }
 
-function escapeHtml(value: string): string {
-  const div = document.createElement('div');
-  div.textContent = value;
-  return div.innerHTML;
-}
+// Phase 3: talks to the real server/api over relative paths (see vite.config.ts's dev
+// proxy) — no more in-memory mock RestClient. mockComponents/mockLabelIndex stay for
+// LinkageMetadataPlugin's fuzzy-match tier only (the API doesn't do label search itself).
+const viewer = new Viewer(viewerContainer, {});
 
-function renderProperties(picked: PickedNodeInfo): void {
-  if (!picked.componentProps) {
-    propertiesPanel.textContent = `${picked.nodeName}: no engineering properties found for this node.`;
-    return;
-  }
-  const rows = Object.entries(picked.componentProps)
-    .map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(String(value))}</td></tr>`)
-    .join('');
-  propertiesPanel.innerHTML = `<strong>${escapeHtml(picked.nodeName)}</strong><table>${rows}</table>`;
-}
-
-// The 3D globe is the ONLY view (see CLAUDE.md's "Rendering surfaces" note) -- constructed
-// immediately, in a container that's visible with real pixel dimensions from the very first
-// render (not lazily, not inside a hidden div; that was a real bug in an earlier version of
-// this app). No model is loaded yet at this point -- the globe itself (Earth) is visible
-// right away regardless.
-let lastPickedNodeName: string | null = null;
-
-const globeView = new GlobeView(globeContainer, {
-  providerConfig: { ionAccessToken: import.meta.env.VITE_CESIUM_ION_TOKEN },
-  onStatus: appendLog,
-  onPick: (picked) => {
-    lastPickedNodeName = picked.nodeName;
-    renderProperties(picked);
-    appendLog(`pick -> ${picked.nodeName}`);
-  },
-});
+viewer.use(createZonesPlugin());
+viewer.use(createMapGeorefPlugin());
+viewer.use(
+  createLinkageMetadataPlugin({
+    linkageKeyByNodeName,
+    labelIndex: mockLabelIndex,
+  }),
+);
 
 async function loadNewestReadyModel(): Promise<void> {
   try {
     const models = (await (await fetch('/api/models')).json()) as ModelSummary[];
     const newestReady = models.find((m) => m.status === 'ready' && m.artifactUrl);
-    if (!newestReady) {
-      appendLog('no ready model in the catalog yet -- upload one below.');
+    if (!newestReady?.artifactUrl) {
+      appendLog('no ready model in the catalog yet — upload one below.');
       return;
     }
     appendLog(`auto-loading newest ready model "${newestReady.name}"...`);
-    const result = await globeView.loadModelById(newestReady.id);
-    if (result.kind === 'placed') appendLog(`placed "${newestReady.name}": ${result.statusLabel}`);
+    const modelInfo = await viewer.loadModel(newestReady.artifactUrl);
+    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to reach the API: ${(err as Error).message}`);
   }
 }
 void loadNewestReadyModel();
 
+let lastPickedId: string | null = null;
+
+viewer.on('pick', (...args: unknown[]) => {
+  const result = args[0] as PickResult;
+  lastPickedId = result.objectId;
+  viewer.highlight([result.objectId]);
+  appendLog(`pick -> ${JSON.stringify(result)}`);
+});
+
 async function loadFile(file: File): Promise<void> {
-  appendLog(`loading ${file.name} (local preview)...`);
+  appendLog(`loading ${file.name}...`);
   try {
-    await globeView.loadLocalFile(file);
+    const buffer = await file.arrayBuffer();
+    const modelInfo = await viewer.loadModel(buffer);
+    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to load ${file.name}: ${(err as Error).message}`);
   }
@@ -94,12 +88,12 @@ fileInput.addEventListener('change', () => {
   if (file) void loadFile(file);
 });
 
-// Drag-drop is attached to the globe container itself (not a covering overlay) so it never
-// blocks pointer events needed for picking.
-globeContainer.addEventListener('dragover', (event) => {
+// Drag-drop is attached to the viewer container itself (not a covering overlay) so it
+// never blocks pointer events needed for pick().
+viewerContainer.addEventListener('dragover', (event) => {
   event.preventDefault();
 });
-globeContainer.addEventListener('drop', (event) => {
+viewerContainer.addEventListener('drop', (event) => {
   event.preventDefault();
   const file = event.dataTransfer?.files?.[0];
   if (file) void loadFile(file);
@@ -108,23 +102,21 @@ globeContainer.addEventListener('drop', (event) => {
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
 
-fitBtn.addEventListener('click', () => globeView.fitToModel());
+fitBtn.addEventListener('click', () => viewer.fitToModel());
 isolateBtn.addEventListener('click', () => {
-  if (lastPickedNodeName) globeView.isolate(lastPickedNodeName);
+  if (lastPickedId) viewer.isolate([lastPickedId]);
 });
-showAllBtn.addEventListener('click', () => globeView.showAll());
+showAllBtn.addEventListener('click', () => viewer.showAll());
 
 // --- Upload to server: distinct from the local-preview file-input/drag-drop above, which
-// loads bytes directly via globeView.loadLocalFile(File) and never touches the API. Always
+// loads bytes directly via viewer.loadModel(ArrayBuffer) and never touches the API. Always
 // POSTs to /api/models/batch (field "files", repeated), even for a single file -- see
 // uploadFilesToServer's doc comment for why always using the batch endpoint (rather than
 // branching to a single-file POST /api/models) matters for correctly grouping an FBX with
 // an LLH file uploaded alongside it. Then polls GET /api/models/{id} per created model until
 // the Phase 4 worker (or, for an uploaded .glb, the API's own immediate self-publish)
 // finishes conversion, and only then loads the real published artifact via
-// globeView.loadModelById(id), which reads back whatever georef the worker already wrote
-// from an LLH file in that same batch -- no manual "save georeference" step needed here.
-// Multiple models poll concurrently, independently.
+// viewer.loadModel({ id, name }). Multiple models poll concurrently, independently.
 
 interface ModelRecord {
   id: string;
@@ -199,8 +191,8 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
 
     if (record.status === 'ready') {
       try {
-        const result = await globeView.loadModelById(modelId);
-        if (result.kind === 'placed') appendLog(`upload ${label}: placed -- ${result.statusLabel}`);
+        const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
+        appendLog(`upload ${label}: loaded "${modelInfo.name}" -- ${modelInfo.objectCount} objects`);
       } catch (err) {
         appendLog(`upload ${label}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
       }
@@ -245,11 +237,10 @@ async function trackedPoll(modelId: string, label: string): Promise<void> {
  * is grouped into one model regardless of selection order; sending them as two separate
  * single-file uploads instead would create two unrelated models and the LLH would never
  * reach the worker as that FBX's georef source. The worker already parses an LLH file and
- * writes its georef automatically (Phase 4) -- by the time a model's status is 'ready',
- * loadModelById's GET .../georef already has it, with no extra "save georeference" step
- * needed here. The returned models are polled concurrently and independently; each gets its
- * own log lines prefixed by its name so concurrent output doesn't read as one confused
- * stream. */
+ * writes its georef automatically (Phase 4), though this three.js viewer path doesn't
+ * currently render that placement -- MapGeorefPlugin's own 2D map is the georef-aware UI
+ * here. The returned models are polled concurrently and independently; each gets its own
+ * log lines prefixed by its name so concurrent output doesn't read as one confused stream. */
 async function uploadFilesToServer(files: File[]): Promise<void> {
   appendLog(`uploading ${files.length} file(s) to server (POST /api/models/batch)...`);
   try {
