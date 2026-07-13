@@ -35,8 +35,15 @@ export interface PickResult {
 export interface ModelInfo {
   id: string;
   name: string;
-  /** Both are handled by the same GLTFLoader-based code path — see CLAUDE.md invariant #4. */
-  format: 'glb' | 'gltf';
+  /** 'glb'/'gltf' are both handled by the same GLTFLoader-based code path; 'tiles' is the
+   * OGC 3D Tiles / 3DTilesRendererJS backend for models over CLAUDE.md invariant #4's size
+   * threshold. Callers of Viewer.loadModel() never choose this -- it just reports which
+   * backend the server told the Viewer to use. */
+  format: 'glb' | 'gltf' | 'tiles';
+  /** For 'tiles', this is the count of entries in the model's linkage-map sidecar (the best
+   * available proxy for "identifiable objects" -- tiles stream in/out dynamically, so there
+   * is no single fixed per-object registry the way the GLB path has), or 0 if the model has
+   * no linkage map. */
   objectCount: number;
   bbox: BoundingBox;
 }
