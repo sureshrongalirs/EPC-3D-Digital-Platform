@@ -19,5 +19,9 @@ To validate the deployment skeleton:
 docker compose -f deploy/docker-compose.yml config
 ```
 
+## Dev setup
+
+To enable large-model tiling in WSL: `bash scripts/setup-wsl-tiler.sh`
+
 See [CLAUDE.md](./CLAUDE.md) for the project's non-negotiable architectural invariants and
 current phase status.
