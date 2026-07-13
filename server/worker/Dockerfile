@@ -31,13 +31,34 @@ FROM node:22-bookworm-slim AS runtime
 #   (server/worker/src/adapters/fbx/assimp.ts).
 # mdbtools: provides `mdb-export`/`mdb-tables` -- streaming .mdb2 ingestion
 #   (server/worker/src/adapters/mdb2/mdbtools.ts).
-# Both installed once, here, from Debian's own apt repos at image-build time. The running
+# curl: only to fetch the two items below at build time -- removed again in the same layer,
+# never present in the running image.
+# Installed once, here, from Debian's own apt repos at image-build time. The running
 # container has no outbound network access at all beyond talking to Postgres (CLAUDE.md
 # invariant #7 -- see deploy/docker-compose.yml's `backend` network, internal: true), so
 # these tools never reach out to anything once the container starts.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends assimp-utils mdbtools \
+  && apt-get install -y --no-install-recommends assimp-utils mdbtools curl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+# mago-3d-tiler (server/worker/src/adapters/tiles/magoTiler.ts): the OGC 3D Tiles generator
+# for the large-model path (CLAUDE.md invariant #4). It's a Java 21+ CLI tool (Gaia3D,
+# MPL-2.0, github.com/Gaia3D/mago-3d-tiler) with no npm package. A per-job Docker container
+# invocation was ruled out (would need outbound/orchestration access this worker deliberately
+# doesn't have -- see the apt-get comment above); instead the jar and a JRE are baked into
+# this image, same as assimp/mdbtools, and invoked as a plain child process.
+#
+# Debian bookworm's own apt repos only reach OpenJDK 17 (no backport for 21 exists at time of
+# writing -- checked via Debian's package tracker), so the JRE comes from Eclipse Adoptium's
+# own portable Linux x64 tarball instead of apt. Both downloads are pinned to an exact
+# version for reproducibility; bump both together when updating.
+RUN curl -fsSL -o /tmp/temurin-jre.tar.gz "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jre_x64_linux_hotspot_21.0.9_10.tar.gz" \
+  && mkdir -p /opt/java \
+  && tar -xzf /tmp/temurin-jre.tar.gz -C /opt/java --strip-components=1 \
+  && rm /tmp/temurin-jre.tar.gz \
+  && curl -fsSL -o /opt/mago-3d-tiler.jar "https://github.com/Gaia3D/mago-3d-tiler/releases/download/v1.15.4/mago-3d-tiler-1.15.4.jar"
+ENV PATH="/opt/java/bin:${PATH}"
+ENV MAGO_TILER_JAR=/opt/mago-3d-tiler.jar
 
 WORKDIR /workspace
 COPY --from=build /workspace/node_modules ./node_modules

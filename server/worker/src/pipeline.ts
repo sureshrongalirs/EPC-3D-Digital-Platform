@@ -51,10 +51,12 @@ export interface ProcessJobResult {
  * join coverage, writes the linkage-map sidecar, and publishes the resulting revision via the
  * shared publishRevision() (CLAUDE.md invariant #6 -- never reimplemented here).
  *
- * Size routing (CLAUDE.md invariant #4): this only ever produces a GLB. A source large
- * enough that probe() estimates it over config.sizeThresholdMb is refused here with a
- * visible "tiles pipeline arrives in Phase 5" failure, not silently converted or dropped --
- * see fbxAdapter.probe()/glbAdapter.probe() for the estimate this check reads.
+ * Size routing (CLAUDE.md invariant #4): fbxAdapter.convert() itself decides GLB vs. OGC 3D
+ * Tiles by comparing the source file's actual size against ctx.sizeThresholdMb (both paths
+ * share the same assimp export step) -- see fbx/index.ts for the branch and
+ * adapters/tiles/index.ts for the tiling pipeline. This function no longer gates on size at
+ * all; it just threads sizeThresholdMb through and publishes whatever artifactType the
+ * adapter returns.
  */
 export async function processJob(db: Database, config: Config, logger: Logger, model: ModelRow): Promise<ProcessJobResult> {
   const revision = (model.current_revision ?? 0) + 1;
@@ -76,6 +78,7 @@ export async function processJob(db: Database, config: Config, logger: Logger, m
     outDir,
     dataDir: config.dataDir,
     dracoForCesium: config.dracoForCesium,
+    sizeThresholdMb: config.sizeThresholdMb,
   };
 
   const warnings: string[] = [];
@@ -90,15 +93,6 @@ export async function processJob(db: Database, config: Config, logger: Logger, m
 
   for (const sourceFile of ordered) {
     const adapter = await resolveAdapter(sourceFile.absolutePath, sourceFile.kind);
-
-    if (sourceFile.kind === 'fbx' || sourceFile.kind === 'other') {
-      const probe = await adapter.probe(sourceFile.absolutePath);
-      if (probe.estimatedSizeMB > config.sizeThresholdMb) {
-        throw new JobFailure(
-          `source exceeds ${config.sizeThresholdMb}MB (estimated ${Math.round(probe.estimatedSizeMB)}MB) -- tiles pipeline arrives in Phase 5`,
-        );
-      }
-    }
 
     let result: ConvertResult;
     try {

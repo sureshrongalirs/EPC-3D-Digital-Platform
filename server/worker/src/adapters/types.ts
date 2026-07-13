@@ -25,6 +25,9 @@ export interface ConvertContext {
   /** See config.ts's Config.dracoForCesium doc comment -- the fbx adapter reads this to
    * decide whether to Draco-compress its GLB output. */
   dracoForCesium: boolean;
+  /** CLAUDE.md invariant #4's size routing threshold, in MB: a source at or under this goes
+   * to a single GLB, larger goes to the OGC 3D Tiles path (see fbx/index.ts's convert()). */
+  sizeThresholdMb: number;
 }
 
 export interface ConvertResult {

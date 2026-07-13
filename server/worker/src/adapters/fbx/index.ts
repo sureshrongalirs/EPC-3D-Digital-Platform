@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { SourceFileRef } from '@plantscope/server-shared';
 
 import type { ConvertContext, ConvertResult, FormatAdapter, ProbeReport } from '../types.js';
+import { tileGlb } from '../tiles/index.js';
 import { assimpExport, assimpFaceCount, isAssimpAvailable } from './assimp.js';
 import { looksLikeFBXBinary } from './binaryReader.js';
 import { compressWithDraco } from './draco.js';
@@ -32,6 +33,12 @@ export const fbxAdapter: FormatAdapter = {
     return { estimatedPeakMemoryMB: sizeMB * 4, estimatedSizeMB: sizeMB, warnings: [] };
   },
 
+  /**
+   * Size routing (CLAUDE.md invariant #4): the source FBX's own size decides GLB vs. OGC 3D
+   * Tiles -- both branches share the same assimp export step below, only what happens to the
+   * resulting intermediate GLB differs. A source at exactly sizeThresholdMb still goes to
+   * GLB ("≤" means GLB, only strictly-greater routes to tiles).
+   */
   async convert(ctx: ConvertContext, sourceFile: SourceFileRef & { absolutePath: string }): Promise<ConvertResult> {
     if (!(await isAssimpAvailable())) {
       throw new Error('assimp is not installed in this environment');
@@ -40,7 +47,6 @@ export const fbxAdapter: FormatAdapter = {
     const warnings: string[] = [];
     await fsp.mkdir(ctx.outDir, { recursive: true });
     const rawGlbPath = path.join(ctx.outDir, 'model.raw.glb');
-    const finalGlbPath = path.join(ctx.outDir, 'model.glb');
 
     await assimpExport(sourceFile.absolutePath, rawGlbPath);
 
@@ -54,6 +60,37 @@ export const fbxAdapter: FormatAdapter = {
       );
     }
 
+    const fbxBuffer = await fsp.readFile(sourceFile.absolutePath);
+    const linkageMap = parseFBXLinkages(fbxBuffer);
+    if (linkageMap.size === 0) {
+      warnings.push('no Linkages properties recovered from this FBX (Properties70 scan found none)');
+    }
+
+    const sourceStat = await fsp.stat(sourceFile.absolutePath);
+    const sourceSizeMB = sourceStat.size / (1024 * 1024);
+
+    if (sourceSizeMB > ctx.sizeThresholdMb) {
+      // Identity preservation for tiles: mago-3d-tiler's batch-table node naming can't be
+      // verified against a real run in this environment (no Java/mago-3d-tiler binary
+      // available to inspect its actual output) -- so rather than guess at extracting
+      // linkage keys from its batch tables, this reuses the linkageMap already recovered
+      // above from the *source FBX itself* (the same parseFBXLinkages() call the GLB path
+      // uses), which is proven correct independent of whatever mago-3d-tiler does to node
+      // names internally.
+      const tilingResult = await tileGlb(rawGlbPath, ctx.outDir);
+      warnings.push(...tilingResult.warnings);
+
+      return {
+        artifact: {
+          artifactType: 'tiles',
+          artifactPath: path.relative(ctx.dataDir, tilingResult.tilesetPath).split(path.sep).join('/'),
+        },
+        linkageMap,
+        warnings,
+      };
+    }
+
+    const finalGlbPath = path.join(ctx.outDir, 'model.glb');
     if (ctx.dracoForCesium) {
       await compressWithDraco(rawGlbPath, finalGlbPath);
       await fsp.rm(rawGlbPath, { force: true });
@@ -63,12 +100,6 @@ export const fbxAdapter: FormatAdapter = {
       // what actually renders. assimp already wrote the exported GLB to rawGlbPath; just
       // rename it into place rather than a redundant read+write copy.
       await fsp.rename(rawGlbPath, finalGlbPath);
-    }
-
-    const fbxBuffer = await fsp.readFile(sourceFile.absolutePath);
-    const linkageMap = parseFBXLinkages(fbxBuffer);
-    if (linkageMap.size === 0) {
-      warnings.push('no Linkages properties recovered from this FBX (Properties70 scan found none)');
     }
 
     return {
