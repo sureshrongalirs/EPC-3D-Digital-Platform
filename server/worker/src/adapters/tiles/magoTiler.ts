@@ -71,6 +71,12 @@ export async function runMagoTiler(inputDir: string, outputDir: string, options:
       '1.1',
       '-mx',
       String(options.maxTriangleCount),
+      // -sbn (splitByNode): tells mago-3d-tiler to treat each node/mesh
+      // in the input GLB as a separate splittable unit. Without this flag,
+      // a single GLB input is treated as one indivisible tile regardless
+      // of its internal node count -- confirmed by testing with 8,511-node
+      // input that produced exactly one 46MB tile across the full -mx range.
+      '-sbn',
     ]);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new MagoTilerUnavailableError(err);
