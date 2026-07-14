@@ -3,8 +3,8 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { Document, NodeIO } from '@gltf-transform/core';
 import type { ModelRow } from '@plantscope/server-shared';
 import { describe, expect, it } from 'vitest';
 
@@ -16,31 +16,45 @@ import { isMagoTilerAvailable } from './magoTiler.js';
 
 const execFileAsync = promisify(execFile);
 
-// Same technique as e2e.test.ts's buildAssimpAuthoredFbx: a hand-built FBX won't pass
-// assimp's own validity checks, so this has assimp itself author a real FBX by round-tripping
-// a trivial GLB -> FBX. That means this fixture carries no custom "Linkages" Properties70
-// entries (assimp doesn't know this repo's convention) -- linkage-key recovery itself is
-// covered separately by adapters/fbx/linkage.test.ts's hand-built fixture. What this test
-// actually proves is the tiles branch of the real pipeline: routing, mago-3d-tiler
-// invocation, the 8MB-per-tile budget, and the linkage-map sidecar still being written
-// (empty, since this fixture has no Linkages -- see below) alongside tileset.json.
-async function buildAssimpAuthoredFbx(dir: string): Promise<string> {
-  const doc = new Document();
-  const buffer = doc.createBuffer();
-  const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
-  const indices = new Uint16Array([0, 1, 2]);
-  const positionAccessor = doc.createAccessor('positions').setType('VEC3').setArray(positions).setBuffer(buffer);
-  const indexAccessor = doc.createAccessor('indices').setType('SCALAR').setArray(indices).setBuffer(buffer);
-  const primitive = doc.createPrimitive().setAttribute('POSITION', positionAccessor).setIndices(indexAccessor);
-  const mesh = doc.createMesh('Triangle').addPrimitive(primitive);
-  const node = doc.createNode('Triangle').setMesh(mesh);
-  doc.createScene('Scene').addChild(node);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const generatorPath = path.resolve(here, '..', '..', '..', '..', '..', 'testdata', 'scripts', 'generate-plant-grid-fixture.mjs');
 
-  const glbPath = path.join(dir, 'triangle.glb');
-  await new NodeIO().write(glbPath, doc);
+async function loadGenerator(): Promise<{
+  generatePlantGridFixture: (outDir: string, mode: 'merged' | 'split', objectCount?: number, segments?: number) => Promise<unknown>;
+}> {
+  return (await import(pathToFileURL(generatorPath).href)) as Awaited<ReturnType<typeof loadGenerator>>;
+}
 
-  const fbxPath = path.join(dir, 'triangle.fbx');
-  await execFileAsync('assimp', ['export', glbPath, fbxPath]);
+// PREVIOUSLY a single unmaterialed triangle (built directly via @gltf-transform/core, then
+// assimp-authored into an FBX by round-tripping GLB -> FBX, matching e2e.test.ts's
+// buildAssimpAuthoredFbx technique). That fixture never exercised the tiles branch the way
+// this test's name claims: real mago-3d-tiler v1.15.4 silently treats unmaterialed primitives
+// as contributing zero content (confirmed directly -- `[Pre] Total Node Count 1` but
+// `Total tile contents count : 0`, a fully well-formed but content-less tileset.json), which
+// this test's own assertion (`tileFiles.length` > 0) should have caught but the old fixture
+// made unreachable, since PRE-Task-1 code only checked `tileset.json` existence, not content
+// (see PR #11's verification pass -- this is a pre-existing defect this PR now fixes, not a
+// regression it introduced).
+//
+// Replaced with generatePlantGridFixture's 'merged' mode (testdata/scripts/
+// generate-plant-grid-fixture.mjs), which always sets a material on every primitive (its own
+// doc comment records the same "unmaterialed primitive -> zero nodes" finding from Phase 5R
+// Task 0). 20 objects / 3 segments is the smallest count empirically verified in WSL (Ubuntu,
+// real mago-3d-tiler v1.15.4, java -jar mago-3d-tiler.jar -input ... -mx 5000 -nl 3 -xl 8 -mg
+// 100, the exact flags magoTiler.ts passes) to produce real tile content through the FULL
+// double assimp round-trip this test exercises (generator GLB -> assimp export -> FBX, then
+// the pipeline's own assimpExport FBX -> raw GLB, then mago) -- confirmed via
+// `[Process Summary] Total tile contents count : 2`, not 0. Kept deliberately small/fast (a
+// single mago invocation completes in ~1.4s at this scale) rather than matching Task 0's
+// production-scale (thousands of objects, >50MB) fixture, which belongs to that task's own
+// spike, not this unit test.
+async function buildTilingFbxFixture(dir: string): Promise<string> {
+  const { generatePlantGridFixture } = await loadGenerator();
+  const genDir = path.join(dir, 'gen');
+  await generatePlantGridFixture(genDir, 'merged', 20, 3);
+
+  const fbxPath = path.join(dir, 'model.fbx');
+  await execFileAsync('assimp', ['export', path.join(genDir, 'model.glb'), fbxPath]);
   return fbxPath;
 }
 
@@ -75,7 +89,7 @@ describe.skipIf(!assimpAvailable || !magoTilerAvailable)(
       const dataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'plantscope-worker-tiles-'));
 
       try {
-        const fbxPath = await buildAssimpAuthoredFbx(dataDir);
+        const fbxPath = await buildTilingFbxFixture(dataDir);
 
         const config: Config = {
           dataDir,
@@ -85,9 +99,9 @@ describe.skipIf(!assimpAvailable || !magoTilerAvailable)(
           parallelism: 2,
           stallTimeoutMs: 60_000,
           largeJobMb: 250,
-          // Forced to 0 so this trivial fixture (a few hundred bytes) still routes to the
-          // tiles branch -- CLAUDE.md's ~100MB threshold is about real-world files, not
-          // something worth reproducing at fixture scale in a fast unit test.
+          // Forced to 0 so this small fixture (tens of KB) still routes to the tiles branch
+          // -- CLAUDE.md's ~100MB threshold is about real-world files, not something worth
+          // reproducing at fixture scale in a fast unit test.
           sizeThresholdMb: 0,
           pollIntervalMs: 1000,
           dracoForCesium: false,
@@ -96,13 +110,13 @@ describe.skipIf(!assimpAvailable || !magoTilerAvailable)(
         const modelId = 'tiles-test-model';
         const rawDir = path.join(config.modelsRawDir, modelId);
         await fsp.mkdir(rawDir, { recursive: true });
-        const rawFbxPath = path.join(rawDir, 'triangle.fbx');
+        const rawFbxPath = path.join(rawDir, 'model.fbx');
         await fsp.copyFile(fbxPath, rawFbxPath);
 
-        const sourceFiles = [{ kind: 'fbx', path: `models/raw/${modelId}/triangle.fbx`, originalName: 'triangle.fbx' }];
+        const sourceFiles = [{ kind: 'fbx', path: `models/raw/${modelId}/model.fbx`, originalName: 'model.fbx' }];
         await ctx.db.knex('models').insert({
           id: modelId,
-          name: 'triangle',
+          name: 'plant-grid',
           source_format: 'fbx',
           size_bytes: (await fsp.stat(rawFbxPath)).size,
           status: 'queued',
