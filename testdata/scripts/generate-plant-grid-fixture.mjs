@@ -1,11 +1,16 @@
-// Generates a synthetic plant-like grid of many small, distinct box meshes -- used by
-// Phase 5R Task 0's mago-3d-tiler re-validation spike (docs/phase5r/task0-findings.md) to
-// test whether a given mago-3d-tiler release actually subdivides a single merged GLB, or
-// only a directory of separate per-object GLBs (see server/worker/src/adapters/tiles/
-// magoTiler.ts's doc comment for the prior finding this re-checks). Never commit the
-// generated output -- it's large by design (>50MB at production scale) and fully
+// Generates synthetic plant-like fixtures for Phase 5R:
+// - generatePlantGridFixture(mode: 'merged'|'split'): Task 0's mago-3d-tiler re-validation
+//   spike (docs/phase5r/task0-findings.md) -- tests whether a given mago-3d-tiler release
+//   actually subdivides a single merged GLB, or only a directory of separate per-object GLBs
+//   (see server/worker/src/adapters/tiles/magoTiler.ts's doc comment for the prior finding
+//   this re-checks).
+// - generateHierarchyFixture(): Task 2's per-object splitter test fixture -- a single merged
+//   GLB with a 4-level-deep Building/Floor/Room/leaf hierarchy, duplicate node names under
+//   different parents, and a seeded mix of normal vs. sub-floor-fragment leaf objects.
+// Never commit generated output -- it's large by design at production scale and fully
 // reproducible, matching CLAUDE.md invariant #8's spirit for synthetic fixtures. Re-run with:
 //   node testdata/scripts/generate-plant-grid-fixture.mjs <outDir> <merged|split> [objectCount] [segments]
+//   node testdata/scripts/generate-plant-grid-fixture.mjs <outDir> hierarchy [seed]
 import { mkdir } from 'node:fs/promises';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -75,6 +80,150 @@ function gridPosition(index, cols, spacing) {
   const x = (index % cols) * spacing;
   const z = Math.floor(index / cols) * spacing;
   return [x, 0, z];
+}
+
+/**
+ * Deterministic seeded PRNG (mulberry32) -- Task 2's splitter fixture (see
+ * generateHierarchyFixture below) needs reproducible-but-not-trivially-patterned pseudo-
+ * randomness (which leaf slots get a sub-floor fragment) so re-running with the same seed
+ * produces byte-identical output, per this task's spec.
+ * @param {number} seed
+ */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function rng() {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const NORMAL_LEAF_TYPES = ['Valve', 'Pump', 'Tank', 'Sensor'];
+const FRAGMENT_LEAF_TYPES = ['Frag_Bolt', 'Frag_Bracket', 'Frag_Gasket'];
+
+/**
+ * A synthetic 4-level-deep plant hierarchy: Scene -> Building_N -> Floor_N -> Room_N -> leaf
+ * object. Leaf node *names* repeat verbatim under different Room parents (drawn from a fixed
+ * pool, `NORMAL_LEAF_TYPES`/`FRAGMENT_LEAF_TYPES`), and Room/Floor names repeat verbatim under
+ * different Floor/Building parents too (`Room_0` exists under every Floor, `Floor_0` under
+ * every Building) -- this is the Task 2 splitter's actual test case: a node's *name* is never
+ * a unique identity, only its full hierarchy path is (Task 2 spec item 1's "filename =
+ * deterministic encoding of the node's hierarchy path", not the leaf name alone).
+ *
+ * Each room's leaves are a deterministic (seeded) mix of "normal" objects
+ * (`normalSegments`-density boxes, `12 * normalSegments^2` triangles each) and "fragment"
+ * objects (`fragmentSegments`-density boxes, `12 * fragmentSegments^2` triangles each,
+ * `fragmentSegments` far lower) -- a downstream splitter's triangle floor is expected to
+ * merge fragments into their parent Room rather than emit them as their own tile.
+ *
+ * Output is a single merged GLB (mode: 'hierarchy' only emits one file, unlike
+ * generatePlantGridFixture's merged/split modes -- Task 2's splitter is what turns this one
+ * file into per-object files, so the fixture itself has no reason to pre-split).
+ *
+ * @param {string} outDir
+ * @param {object} [options]
+ * @param {number} [options.seed]
+ * @param {number} [options.buildingCount]
+ * @param {number} [options.floorsPerBuilding]
+ * @param {number} [options.roomsPerFloor]
+ * @param {number} [options.objectsPerRoom]
+ * @param {number} [options.fragmentProbability] fraction (0-1) of leaf slots that get a
+ *   sub-floor fragment instead of a normal object.
+ * @param {number} [options.normalSegments]
+ * @param {number} [options.fragmentSegments]
+ */
+export async function generateHierarchyFixture(outDir, options = {}) {
+  const {
+    seed = 42,
+    buildingCount = 2,
+    floorsPerBuilding = 2,
+    roomsPerFloor = 2,
+    objectsPerRoom = 4,
+    fragmentProbability = 0.3,
+    normalSegments = 4,
+    fragmentSegments = 1,
+  } = options;
+
+  await mkdir(outDir, { recursive: true });
+  const rng = mulberry32(seed);
+
+  const doc = new Document();
+  const buffer = doc.createBuffer();
+  const scene = doc.createScene('Scene');
+  doc.getRoot().setDefaultScene(scene);
+  const material = doc.createMaterial('DefaultMaterial').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+
+  const normalTriangleCount = 12 * normalSegments * normalSegments;
+  const fragmentTriangleCount = 12 * fragmentSegments * fragmentSegments;
+
+  const buildingSpacing = 40;
+  const floorSpacing = 10;
+  const roomSpacing = 6;
+  const leafSpacing = 1.5;
+
+  let normalObjectCount = 0;
+  let fragmentCount = 0;
+  let uid = 0;
+
+  function addLeaf(parent, isFragment, index, translation) {
+    const typePool = isFragment ? FRAGMENT_LEAF_TYPES : NORMAL_LEAF_TYPES;
+    const name = typePool[index % typePool.length];
+    const segments = isFragment ? fragmentSegments : normalSegments;
+    const { positions, indices } = subdividedBoxGeometry([0.5, 0.5, 0.5], segments);
+    uid += 1;
+    const positionAccessor = doc.createAccessor(`leaf-${uid}-positions`).setType('VEC3').setArray(positions).setBuffer(buffer);
+    const indexAccessor = doc.createAccessor(`leaf-${uid}-indices`).setType('SCALAR').setArray(indices).setBuffer(buffer);
+    const primitive = doc.createPrimitive().setAttribute('POSITION', positionAccessor).setIndices(indexAccessor).setMaterial(material);
+    const mesh = doc.createMesh(name).addPrimitive(primitive);
+    const node = doc.createNode(name).setMesh(mesh).setTranslation(translation);
+    parent.addChild(node);
+    if (isFragment) fragmentCount += 1;
+    else normalObjectCount += 1;
+  }
+
+  for (let b = 0; b < buildingCount; b++) {
+    const building = doc.createNode(`Building_${b}`).setTranslation([b * buildingSpacing, 0, 0]);
+    scene.addChild(building);
+
+    for (let f = 0; f < floorsPerBuilding; f++) {
+      const floor = doc.createNode(`Floor_${f}`).setTranslation([0, f * floorSpacing, 0]);
+      building.addChild(floor);
+
+      for (let r = 0; r < roomsPerFloor; r++) {
+        const room = doc.createNode(`Room_${r}`).setTranslation([r * roomSpacing, 0, 0]);
+        floor.addChild(room);
+
+        const cols = Math.ceil(Math.sqrt(objectsPerRoom));
+        for (let i = 0; i < objectsPerRoom; i++) {
+          const isFragment = rng() < fragmentProbability;
+          const translation = gridPosition(i, cols, leafSpacing);
+          addLeaf(room, isFragment, i, translation);
+        }
+      }
+    }
+  }
+
+  const outFile = path.join(outDir, 'model.glb');
+  await new NodeIO().write(outFile, doc);
+  const stat = await fsp.stat(outFile);
+
+  return {
+    mode: 'hierarchy',
+    seed,
+    buildingCount,
+    floorsPerBuilding,
+    roomsPerFloor,
+    objectsPerRoom,
+    depth: 4, // Building -> Floor -> Room -> leaf, below the implicit Scene root
+    totalObjects: normalObjectCount + fragmentCount,
+    normalObjectCount,
+    fragmentCount,
+    normalTriangleCount,
+    fragmentTriangleCount,
+    fileCount: 1,
+    totalBytes: stat.size,
+  };
 }
 
 /**
@@ -150,18 +299,27 @@ export async function generatePlantGridFixture(outDir, mode, objectCount = 6000,
 }
 
 async function main() {
-  const [outDir, mode, objectCountArg, segmentsArg] = process.argv.slice(2);
+  const [outDir, mode, arg1, arg2] = process.argv.slice(2);
   if (!outDir || !mode) {
-    console.error('usage: generate-plant-grid-fixture.mjs <outDir> <merged|split> [objectCount] [segments]');
+    console.error(
+      'usage: generate-plant-grid-fixture.mjs <outDir> <merged|split> [objectCount] [segments]\n' +
+        '       generate-plant-grid-fixture.mjs <outDir> hierarchy [seed]',
+    );
     process.exitCode = 2;
     return;
   }
-  const result = await generatePlantGridFixture(
-    outDir,
-    mode,
-    objectCountArg ? Number(objectCountArg) : undefined,
-    segmentsArg ? Number(segmentsArg) : undefined,
-  );
+
+  if (mode === 'hierarchy') {
+    const result = await generateHierarchyFixture(outDir, arg1 ? { seed: Number(arg1) } : undefined);
+    console.log(
+      `wrote ${result.fileCount} file(s), ${result.totalObjects} objects ` +
+        `(${result.normalObjectCount} normal + ${result.fragmentCount} fragment), depth=${result.depth}, ` +
+        `${(result.totalBytes / (1024 * 1024)).toFixed(2)}MB to ${outDir} (mode=hierarchy, seed=${result.seed})`,
+    );
+    return;
+  }
+
+  const result = await generatePlantGridFixture(outDir, mode, arg1 ? Number(arg1) : undefined, arg2 ? Number(arg2) : undefined);
   console.log(
     `wrote ${result.fileCount} file(s), ${result.objectCount} objects, ` +
       `${(result.totalBytes / (1024 * 1024)).toFixed(1)}MB to ${outDir} (mode=${result.mode})`,
