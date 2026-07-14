@@ -48,7 +48,7 @@ function silentLogger() {
   return { info: () => {}, warn: () => {}, error: () => {}, child: () => silentLogger() } as unknown as import('pino').Logger;
 }
 
-const TILE_CONTENT_EXTENSIONS = new Set(['.b3dm', '.i3dm', '.pnts', '.cmpt']);
+const TILE_CONTENT_EXTENSIONS = new Set(['.b3dm', '.i3dm', '.pnts', '.cmpt', '.glb']);
 
 async function listTileFilesRecursively(dir: string): Promise<string[]> {
   const out: string[] = [];

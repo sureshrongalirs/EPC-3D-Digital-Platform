@@ -50,10 +50,10 @@ export interface MagoTilerOptions {
 }
 
 /** Runs `java -jar mago-3d-tiler.jar -input <inputDir> -output <outputDir> -inputType glb
- * -outputType b3dm -tv 1.1 -mx <maxTriangleCount>`. mago-3d-tiler takes a *directory* as
+ * -outputType glb -tv 1.1 -mx <maxTriangleCount> -sbn`. mago-3d-tiler takes a *directory* as
  * input (it globs by -inputType inside it), not a single file path -- callers are expected
  * to have already staged the intermediate GLB alone in its own directory. Produces
- * `{outputDir}/tileset.json` plus the tile (.b3dm) files themselves on success. */
+ * `{outputDir}/tileset.json` plus the tile (.glb) files themselves on success. */
 export async function runMagoTiler(inputDir: string, outputDir: string, options: MagoTilerOptions): Promise<void> {
   try {
     await execFileAsync('java', [
@@ -65,8 +65,11 @@ export async function runMagoTiler(inputDir: string, outputDir: string, options:
       outputDir,
       '-inputType',
       'glb',
+      // -outputType glb: 3D Tiles 1.1 (-tv 1.1) uses native GLB tile content.
+      // Do NOT use -outputType b3dm here -- b3dm is the legacy 1.0 format and
+      // conflicts with -tv 1.1, causing a crash when combined with -sbn.
       '-outputType',
-      'b3dm',
+      'glb',
       '-tv',
       '1.1',
       '-mx',
