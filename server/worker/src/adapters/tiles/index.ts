@@ -9,14 +9,23 @@ const MAX_TILE_SIZE_BYTES = 8 * 1024 * 1024;
  * which point this gives up subdividing further and reports the offending tiles as a job
  * warning instead (per this task's "do not silently ignore" requirement) rather than looping
  * forever or failing the whole job over a handful of oversized tiles. */
-const INITIAL_MAX_TRIANGLE_COUNT = 30_000;
+// Confirmed too high against a real mago-3d-tiler run (an FBX-derived model that produced
+// exactly one 46MB tile, no subdivision at all) -- lowered to force more aggressive splitting.
+const INITIAL_MAX_TRIANGLE_COUNT = 5_000;
 const MIN_MAX_TRIANGLE_COUNT = 500;
 const TRIANGLE_COUNT_BACKOFF_FACTOR = 0.5;
 
-/** mago-3d-tiler's own tile content extensions (3D Tiles 1.1 batched/instanced/point
- * formats) -- tileset.json itself is excluded from the size check, only actual tile payloads
- * count against the 8MB-per-tile budget. */
-const TILE_CONTENT_EXTENSIONS = new Set(['.b3dm', '.i3dm', '.pnts', '.cmpt']);
+/** mago-3d-tiler's own tile content extensions -- tileset.json itself is excluded from the
+ * size check, only actual tile payloads count against the 8MB-per-tile budget.
+ *
+ * Confirmed against a real run: with -tv 1.1 (3D Tiles 1.1, what this worker always passes --
+ * see runMagoTiler()), mago-3d-tiler emits tile content as plain .glb files directly (the 3D
+ * Tiles 1.1 "3DTILES_content_gltf" native-glTF-content model), NOT the legacy .b3dm container
+ * this list originally assumed. .b3dm/.i3dm/.pnts/.cmpt are kept here too in case a future
+ * mago-3d-tiler version or a -tv 1.0 invocation produces them, but .glb is what actually shows
+ * up today -- omitting it silently made every tiled model appear to satisfy the 8MB budget
+ * regardless of real tile size, since nothing was being checked at all. */
+const TILE_CONTENT_EXTENSIONS = new Set(['.b3dm', '.i3dm', '.pnts', '.cmpt', '.glb']);
 
 async function listTileFiles(dir: string): Promise<string[]> {
   const out: string[] = [];

@@ -181,12 +181,17 @@ sessions.
   /api/components?model={id}&fields=bbox`) instead of live scene geometry, since an object's
   tile may not currently be streamed in. **Known gap, not silently glossed over:**
   `mago-3d-tiler` does not apply Draco compression natively (confirmed against its own docs)
-  and per-tile Draco re-compression (rewriting the b3dm binary container) was left
-  unimplemented since there was no real `mago-3d-tiler` output available in the environment
-  this was built in to validate it against — the ≤8MB-per-tile budget is enforced for real,
-  just via triangle-count-driven LOD depth rather than compression. HDR image-based lighting
-  (`packages/core/assets/studio_small_09_1k.hdr`, via three.js's `HDRLoader`) was folded into
-  this phase since it touched the same `Viewer.ts` constructor.
+  and per-tile Draco re-compression was left unimplemented since there was no real
+  `mago-3d-tiler` output available in the environment this was built in to validate it
+  against — the ≤8MB-per-tile budget is enforced for real, just via triangle-count-driven LOD
+  depth rather than compression. **Corrected after real end-to-end testing** (see
+  `scripts/setup-wsl-tiler.sh`, added specifically to make that testing possible in dev):
+  with `-tv 1.1` (always used), `mago-3d-tiler` emits tile content as plain `.glb` files, not
+  the legacy `.b3dm` container this was originally assumed to use — the size-check in
+  `adapters/tiles/index.ts` originally didn't look for `.glb` at all, so it silently saw every
+  tiled model as satisfying the 8MB budget regardless of real tile size. Fixed, along with
+  lowering the initial max-triangles-per-tile from 30k to 5k after a real run produced a
+  single 46MB tile (no subdivision at all) at the old default.
 - **Phase 6 (next):** deployment hardening — full docker-compose, TLS, auth/RBAC, audit
   log, backup/restore runbook.
 - **Phase 7 (not started):** E2E tests, validation harness, load testing.
