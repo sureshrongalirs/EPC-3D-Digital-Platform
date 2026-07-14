@@ -49,16 +49,33 @@ export interface MagoTilerOptions {
   maxTriangleCount: number;
 }
 
+export interface MagoTilerResult {
+  /** Process exit code. 0 on a normal run. Non-zero means mago-3d-tiler itself reported
+   * failure (e.g. the Task 0 spike's `TileProcessingException: Tileset root node children is
+   * null or empty` crash on dense merged-GLB input) -- the integrity gate in ./index.ts must
+   * treat this as an immediate hard failure without even looking at the output directory, since
+   * a non-zero exit means mago itself gave up, not that it produced something merely
+   * incomplete. */
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
 /** Runs `java -jar mago-3d-tiler.jar -input <inputDir> -output <outputDir> -inputType glb
  * -outputType b3dm -tv 1.1 -mx <maxTriangleCount> -nl 3 -xl 8 -mg 100`. mago-3d-tiler takes a
  * *directory* as input (it globs by -inputType inside it), not a single file path -- callers
  * are expected to have already staged the intermediate GLB alone in its own directory.
  * Produces `{outputDir}/tileset.json` plus the tile files themselves on success -- see
  * TILE_CONTENT_EXTENSIONS in ../tiles/index.ts for why those are actually named .glb despite
- * -outputType being 'b3dm' (confirmed against a real run). */
-export async function runMagoTiler(inputDir: string, outputDir: string, options: MagoTilerOptions): Promise<void> {
+ * -outputType being 'b3dm' (confirmed against a real run).
+ *
+ * Deliberately does not throw on a non-zero mago exit (only on ENOENT -- java/the jar itself
+ * missing) -- it returns the exit code plus captured stdout/stderr instead, so the caller's
+ * integrity gate can build a structured, user-visible failure message (exit code + last log
+ * lines) rather than swallowing that detail into a generic execFile error. */
+export async function runMagoTiler(inputDir: string, outputDir: string, options: MagoTilerOptions): Promise<MagoTilerResult> {
   try {
-    await execFileAsync('java', [
+    const { stdout, stderr } = await execFileAsync('java', [
       '-jar',
       jarPath(),
       '-input',
@@ -105,8 +122,14 @@ export async function runMagoTiler(inputDir: string, outputDir: string, options:
       '-mg',
       '100',
     ]);
+    return { exitCode: 0, stdout, stderr };
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new MagoTilerUnavailableError(err);
-    throw new Error(`mago-3d-tiler ${inputDir} -> ${outputDir} failed: ${String(err)}`);
+    const execErr = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+    if (execErr.code === 'ENOENT') throw new MagoTilerUnavailableError(err);
+    // execFile sets `.code` to the process's numeric exit code on a normal non-zero exit, or
+    // to a string (e.g. 'ENOENT', handled above) when the process never ran at all. A signal
+    // kill leaves `.code` null/undefined -- reported as -1 since there is no real exit code.
+    const exitCode = typeof execErr.code === 'number' ? execErr.code : -1;
+    return { exitCode, stdout: execErr.stdout ?? '', stderr: execErr.stderr ?? '' };
   }
 }
