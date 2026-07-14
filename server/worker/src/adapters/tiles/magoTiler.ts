@@ -50,10 +50,12 @@ export interface MagoTilerOptions {
 }
 
 /** Runs `java -jar mago-3d-tiler.jar -input <inputDir> -output <outputDir> -inputType glb
- * -outputType glb -tv 1.1 -mx <maxTriangleCount> -sbn`. mago-3d-tiler takes a *directory* as
- * input (it globs by -inputType inside it), not a single file path -- callers are expected
- * to have already staged the intermediate GLB alone in its own directory. Produces
- * `{outputDir}/tileset.json` plus the tile (.glb) files themselves on success. */
+ * -outputType b3dm -tv 1.1 -mx <maxTriangleCount> -nl 3 -xl 8 -mg 100`. mago-3d-tiler takes a
+ * *directory* as input (it globs by -inputType inside it), not a single file path -- callers
+ * are expected to have already staged the intermediate GLB alone in its own directory.
+ * Produces `{outputDir}/tileset.json` plus the tile files themselves on success -- see
+ * TILE_CONTENT_EXTENSIONS in ../tiles/index.ts for why those are actually named .glb despite
+ * -outputType being 'b3dm' (confirmed against a real run). */
 export async function runMagoTiler(inputDir: string, outputDir: string, options: MagoTilerOptions): Promise<void> {
   try {
     await execFileAsync('java', [
@@ -65,21 +67,43 @@ export async function runMagoTiler(inputDir: string, outputDir: string, options:
       outputDir,
       '-inputType',
       'glb',
-      // -outputType glb: 3D Tiles 1.1 (-tv 1.1) uses native GLB tile content.
-      // Do NOT use -outputType b3dm here -- b3dm is the legacy 1.0 format and
-      // conflicts with -tv 1.1, causing a crash when combined with -sbn.
+      // -outputType: only b3dm/i3dm/pnts are valid values (confirmed directly against
+      // `java -jar mago-3d-tiler.jar --help` on the real v1.15.4 binary -- 'glb' and
+      // '3dtiles' are NOT accepted here despite seeming like the obvious choice given -tv
+      // 1.1's actual tile output; passing an unrecognized value here is what previously
+      // crashed mago-3d-tiler with "Tileset root node children is null or empty" when
+      // combined with -sbn, not a real b3dm/-tv-1.1 conflict as first suspected. b3dm
+      // ("Batched 3D Model") is the correct semantic category for a single textured mesh
+      // batch -- i3dm is for GPU-instanced models, pnts is for point clouds.
       '-outputType',
-      'glb',
+      'b3dm',
       '-tv',
       '1.1',
       '-mx',
       String(options.maxTriangleCount),
-      // -sbn (splitByNode): tells mago-3d-tiler to treat each node/mesh
-      // in the input GLB as a separate splittable unit. Without this flag,
-      // a single GLB input is treated as one indivisible tile regardless
-      // of its internal node count -- confirmed by testing with 8,511-node
-      // input that produced exactly one 46MB tile across the full -mx range.
-      '-sbn',
+      // -sbn was tested and removed -- it crashes with "Total Node Count 0"
+      // on real GLB input (confirmed upstream bug, mago-3d-tiler issue #52).
+      //
+      // -nl/-xl/-mg: the LOD-depth levers that actually control real tile subdivision,
+      // separate from -mx (the per-tile triangle budget). Real testing showed -mx alone,
+      // across its full practical range (30,000 down to 500), had no effect on tile count
+      // or size for an 8,511-node input -- one 46MB tile every time -- so -mx alone isn't
+      // sufficient; mago-3d-tiler also needs to be told how many LOD levels to actually
+      // generate.
+      //   -nl (--minLod): minimum level of detail to generate.
+      //   -xl (--maxLod): maximum level of detail to generate -- more levels means more
+      //     opportunities to subdivide.
+      //   -mg (--maxGeometricError): NOT "merge distance in meters" despite how it may read --
+      //     confirmed directly against --help ("[Tileset] Maximum geometric error"). It's a
+      //     3D Tiles screen-space-error-style tolerance: the largest geometric error a tile
+      //     is allowed to have before a finer LOD is required, so a smaller value forces more
+      //     aggressive subdivision to stay under it.
+      '-nl',
+      '3',
+      '-xl',
+      '8',
+      '-mg',
+      '100',
     ]);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new MagoTilerUnavailableError(err);
