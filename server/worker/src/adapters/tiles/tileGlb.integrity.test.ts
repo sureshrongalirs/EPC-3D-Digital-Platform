@@ -248,7 +248,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
     }
   });
 
-  it('edge: content keys exist but every referenced file is missing -- still routes through the repair path (case (b)), which then fails because nothing survives', async () => {
+  it('edge: content keys exist but every referenced file is missing -- still routes through the repair path (case (b)), which then fails via repairTileset\'s own pre-repair guard (validation.tiles.length === 0 at entry, before it ever attempts to write anything)', async () => {
     const dir = await makeTempDir();
     try {
       const rawGlb = await makeRawGlb(dir);
@@ -268,9 +268,48 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
       const err = await expectRejection(tileGlb(rawGlb, outDir));
 
       // Contrast with the zero-content test: this DOES have content references, so repair is
-      // attempted (case (b)) -- it just converges to nothing, which is itself a failure.
+      // attempted (case (b)) -- it just converges to nothing, which is itself a failure. This
+      // message ("nothing survives") is repairTileset's OWN early-guard error
+      // (tilesetIntegrity.ts's `if (validation.tiles.length === 0) throw ...`, fired BEFORE
+      // any write), not index.ts's post-repair integrityFailure() -- that message says "did
+      // not converge" instead (see the next test, which isolates that other path
+      // specifically). Both are real, hard failures; they're just two different guards.
       expect(mockedRepairTileset).toHaveBeenCalledTimes(1);
       expect(err.message).toMatch(/nothing survives/);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defense in depth: if repairTileset ever returned without throwing despite leaving zero surviving tiles, index.ts\'s OWN post-repair re-validation independently catches it and never publishes', async () => {
+    const dir = await makeTempDir();
+    try {
+      const rawGlb = await makeRawGlb(dir);
+      const outDir = path.join(dir, 'out');
+
+      mockedRunMagoTiler.mockImplementation(async (_inputDir, outputDir) => {
+        await fsp.mkdir(outputDir, { recursive: true });
+        // A single missing reference -- ok:false, so the repair branch (case (b)) is entered.
+        await fsp.writeFile(path.join(outputDir, 'tileset.json'), JSON.stringify({ root: { content: { uri: 'gone.glb' } } }));
+        return { exitCode: 0, stdout: '', stderr: '' };
+      });
+
+      // The REAL repairTileset can never reach "returned normally but left zero tiles" (its
+      // own guard above throws first whenever it would). This override simulates that
+      // hypothetical anyway, to prove index.ts doesn't blindly trust repairTileset's success --
+      // it independently re-validates the file repairTileset actually wrote, using the exact
+      // same tileCount > 0 rule.
+      mockedRepairTileset.mockImplementationOnce(async (repairOutputDir: string) => {
+        await fsp.writeFile(path.join(repairOutputDir, 'tileset.json'), JSON.stringify({ root: {} }));
+        return { kept: [], dropped: ['gone.glb'] };
+      });
+
+      const err = await expectRejection(tileGlb(rawGlb, outDir));
+
+      expect(mockedRepairTileset).toHaveBeenCalledTimes(1);
+      // This message comes from index.ts's own post-repair check, not repairTileset -- the
+      // opposite half of the previous test's contrast.
+      expect(err.message).toContain('did not converge');
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
