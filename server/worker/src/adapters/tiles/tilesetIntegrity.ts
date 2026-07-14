@@ -104,8 +104,12 @@ export interface ValidatedTile {
 }
 
 export interface TilesetValidationResult {
-  /** True only when tileset.json parsed with a root node AND every content reference it
-   * makes resolves to a real, non-empty file on disk. */
+  /** True only when tileset.json parsed with a root node, every content reference it makes
+   * resolves to a real non-empty file on disk (missing.length === 0), AND at least one tile
+   * actually survives (tiles.length > 0). A tileset whose tree references zero content
+   * anywhere is not "valid" just because nothing in it is *missing* -- see `referencedCount`.
+   * This is the gate's canonical publish invariant, enforced here rather than left to a
+   * caller: `ok` is false whenever tileCount would be 0, full stop. */
   ok: boolean;
   loadStatus: TilesetLoadResult['status'];
   /** Present only when loadStatus === 'malformed'. */
@@ -121,6 +125,16 @@ export interface TilesetValidationResult {
   tileCount: number;
   totalBytes: number;
   maxTileBytes: number;
+  /** Distinct content URIs the tree references at all (before checking existence). 0 means
+   * the tileset has no content anywhere -- not even a dangling reference to a missing file --
+   * a distinct failure class from "references content that's missing" (case (b)'s repair
+   * target): there is nothing for repairTileset to rebuild from, so callers must treat
+   * referencedCount === 0 as a hard failure and never invoke repairTileset for it. Confirmed
+   * against real mago-3d-tiler v1.15.4 output (an unmaterialed-primitive input): a fully
+   * well-formed root+children+geometricError-chain tree with zero `content`/`contents` keys
+   * anywhere, which previously passed this gate as "ok" since nothing was technically
+   * "missing" -- see tilesetIntegrity.test.ts's "zero-content" tests for the exact fixture. */
+  referencedCount: number;
 }
 
 /**
@@ -142,6 +156,7 @@ export async function validateTileset(outputDir: string): Promise<TilesetValidat
       tileCount: 0,
       totalBytes: 0,
       maxTileBytes: 0,
+      referencedCount: 0,
     };
   }
 
@@ -168,7 +183,7 @@ export async function validateTileset(outputDir: string): Promise<TilesetValidat
   const maxTileBytes = tiles.reduce((max, t) => Math.max(max, t.sizeBytes), 0);
 
   return {
-    ok: missing.length === 0,
+    ok: missing.length === 0 && tiles.length > 0,
     loadStatus: 'ok',
     missing,
     orphans,
@@ -176,6 +191,7 @@ export async function validateTileset(outputDir: string): Promise<TilesetValidat
     tileCount: tiles.length,
     totalBytes,
     maxTileBytes,
+    referencedCount: referencedUris.size,
   };
 }
 

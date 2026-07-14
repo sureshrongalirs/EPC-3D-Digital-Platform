@@ -98,6 +98,18 @@ export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileG
       );
     }
 
+    // Case (c), path 3: tileset.json parsed fine and every reference it makes resolves (so
+    // validation.ok's "nothing missing" half is vacuously satisfied) -- but the tree
+    // references ZERO content anywhere. This is not a repair target: repairTileset rebuilds
+    // from surviving referenced content, and there is nothing referenced to survive. Checked
+    // before the repair branch below so repairTileset is provably never invoked for this case
+    // (confirmed against real mago-3d-tiler v1.15.4 output -- an unmaterialed-primitive input
+    // that produced a fully well-formed root+children+geometricError-chain tree with zero
+    // `content` keys anywhere; see tilesetIntegrity.test.ts for the exact fixture).
+    if (validation.referencedCount === 0) {
+      throw integrityFailure('tileset references no content', runResult);
+    }
+
     // Case (b): tileset.json exists but references missing/empty tile content -- repair by
     // regenerating from whatever content actually survived, then re-validate before trusting
     // the result.

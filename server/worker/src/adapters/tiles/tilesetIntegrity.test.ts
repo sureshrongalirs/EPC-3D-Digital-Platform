@@ -164,6 +164,48 @@ describe('validateTileset (Task 1 item 1: content + orphan + stats validation)',
       await fsp.rm(dir, { recursive: true, force: true });
     }
   });
+
+  // Verbatim tileset.json written by real mago-3d-tiler v1.15.4 (confirmed via direct `java
+  // -jar mago-3d-tiler.jar` invocation against an unmaterialed-primitive GLB during PR #11
+  // verification) -- a fully well-formed root+children+geometricError chain, REPLACE refine,
+  // the 3DTILES_content_gltf extension declared, and ZERO `content`/`contents` keys anywhere
+  // in the tree. This is not "references content that's missing" (case (b)'s repair target)
+  // -- nothing is referenced at all, so there's nothing to repair from. Before this fix,
+  // `ok` was `missing.length === 0`, which is vacuously true here, so this tileset published
+  // successfully with zero renderable tiles.
+  const REAL_MAGO_ZERO_CONTENT_TILESET =
+    '{"asset":{"version":"1.1"},"geometricError":16.0,"root":{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":16.0,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":256.1,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":128.1,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":64.1,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":32.1,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":16.1,"children":[{"boundingVolume":{"region":[0.0,-1.0E-8,1.5E-7,1.5E-7,3.0E-8,3.0E-8]},"refine":"REPLACE","geometricError":8.1}]}]}]}]}]}]},"extensionsUsed":["3DTILES_content_gltf"],"extensions":{"3DTILES_content_gltf":{}}}';
+
+  it('fails ok (and reports referencedCount === 0) for the exact real-mago zero-content shape, even though nothing is technically "missing"', async () => {
+    const dir = await makeTempDir();
+    try {
+      await fsp.writeFile(path.join(dir, 'tileset.json'), REAL_MAGO_ZERO_CONTENT_TILESET);
+
+      const result = await validateTileset(dir);
+      expect(result.loadStatus).toBe('ok');
+      expect(result.missing).toEqual([]);
+      expect(result.referencedCount).toBe(0);
+      expect(result.tileCount).toBe(0);
+      expect(result.ok).toBe(false);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('regression guard: a valid tileset with exactly one surviving tile is still ok (only tileCount === 0 is disqualifying)', async () => {
+    const dir = await makeTempDir();
+    try {
+      await writeTestGlb(path.join(dir, 'only.glb'));
+      await writeTileset(dir, { root: { content: { uri: 'only.glb' } } });
+
+      const result = await validateTileset(dir);
+      expect(result.ok).toBe(true);
+      expect(result.referencedCount).toBe(1);
+      expect(result.tileCount).toBe(1);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('repairTileset (Task 1 item 2: regenerate from surviving content only)', () => {
