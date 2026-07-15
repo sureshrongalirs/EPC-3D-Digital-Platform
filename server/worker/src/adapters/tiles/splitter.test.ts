@@ -284,6 +284,86 @@ describe('splitObjects (Task 2 per-object pipeline reshape)', () => {
     }
   });
 
+  it('blob-ratio symptom guard: minimal boundary case (3 of 5 = 60%, just over the default 50% threshold) fires the warning but still publishes normally, does not throw', async () => {
+    // Smallest legitimate case that crosses the default 0.5 ratio: one mergedFragmentGroup
+    // absorbing 3 of 5 total mesh-bearing objects (60% > 50%). Multi-root scene
+    // (Group + BigA + BigB are all direct scene children), so resolveEffectiveRoots() never
+    // fires its own "not stripped" warning here -- this test isolates the blob-ratio guard
+    // specifically, not the two observability layers interacting.
+    const outDir = await makeTempDir();
+    const genDir = await makeTempDir();
+    try {
+      const doc = new Document();
+      const buffer = doc.createBuffer();
+      const material = doc.createMaterial('Mat').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+      const scene = doc.createScene('Scene');
+      doc.getRoot().setDefaultScene(scene);
+
+      function addLeaf(parent: ReturnType<Document['createNode']>, name: string, triangleCount: number): void {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < triangleCount; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        const node = doc.createNode(name).setMesh(mesh);
+        parent.addChild(node);
+      }
+
+      const group = doc.createNode('Group'); // meshless -- NOT the sole scene child, so no "not stripped" warning
+      scene.addChild(group);
+      addLeaf(group, 'F1', 1);
+      addLeaf(group, 'F2', 1);
+      addLeaf(group, 'F3', 1);
+
+      function makeNormalMeshNode(name: string): void {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < 100; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        const node = doc.createNode(name).setMesh(mesh);
+        scene.addChild(node);
+      }
+      makeNormalMeshNode('BigA'); // 100 triangles, well above the floor of 50
+      makeNormalMeshNode('BigB');
+
+      const glbPath = path.join(genDir, 'model.glb');
+      await new NodeIO().write(glbPath, doc);
+
+      // Total mesh objects = F1 + F2 + F3 + BigA + BigB = 5. The group's 3 constituents is
+      // exactly 60% -- just over the default 50% threshold, the smallest legitimate case that
+      // still fires (3 of 5; 2 of 5 = 40% would not).
+      const result = await splitObjects(glbPath, outDir, new Map(), { triangleFloor: 50 });
+
+      expect(result.objects).toHaveLength(3); // Group's merged object + BigA + BigB, fully populated
+      const groupObject = result.objects.find((o) => o.kind === 'mergedFragmentGroup');
+      expect(groupObject).toBeDefined();
+      expect(groupObject!.mergedFrom).toHaveLength(3);
+
+      const blobWarning = result.warnings.find((w) => w.includes('combines') && w.includes('total mesh-bearing source object'));
+      expect(blobWarning).toBeDefined();
+      expect(blobWarning).toContain('3 of 5');
+
+      const files = await listGlbFiles(outDir);
+      expect(files).toHaveLength(3); // publish proceeded normally -- splitObjects() did not throw
+    } finally {
+      await fsp.rm(genDir, { recursive: true, force: true });
+      await fsp.rm(outDir, { recursive: true, force: true });
+    }
+  });
+
   it('nested tree with duplicate names + mixed fragments: fragments group per meshless-ancestor, files = normal + distinct group targets (not normal + fragmentCount)', async () => {
     const { generateHierarchyFixture } = await loadGenerator();
     const genDir = await makeTempDir();
@@ -370,6 +450,116 @@ describe('splitObjects (Task 2 per-object pipeline reshape)', () => {
       expect(object!.linkageKey).toBe('LINK-BIGVALVE');
       expect(object!.mergedFrom).toEqual([{ name: 'TinyBolt', linkageKey: 'LINK-TINYBOLT' }]);
       expect(object!.triangleCount).toBe(101); // 100 (BigValve) + 1 (TinyBolt)
+
+      const files = await listGlbFiles(outDir);
+      expect(files).toHaveLength(1);
+    } finally {
+      await fsp.rm(genDir, { recursive: true, force: true });
+      await fsp.rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('PR #13 fix-up 2: fragment under a mesh-bearing FRAGMENT ancestor (not a normal one) merges into that ancestor\'s own output object, one file, one record', async () => {
+    // Extends the ancestor-with-own-mesh rule (test above) to fragment ancestors too, not
+    // just normal-sized ones. FragParent has no parent of its own (scene root), so it's the
+    // top of this chain and becomes the merge target directly -- kind 'standaloneFragment',
+    // now carrying mergedFrom for the child that climbed to it.
+    const outDir = await makeTempDir();
+    const genDir = await makeTempDir();
+    try {
+      const doc = new Document();
+      const buffer = doc.createBuffer();
+      const material = doc.createMaterial('Mat').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+      const scene = doc.createScene('Scene');
+      doc.getRoot().setDefaultScene(scene);
+
+      function makeMeshNode(name: string, triangleMultiplier: number): { node: ReturnType<Document['createNode']>; triangleCount: number } {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < triangleMultiplier; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        return { node: doc.createNode(name).setMesh(mesh), triangleCount: triangleMultiplier };
+      }
+
+      const { node: fragParent } = makeMeshNode('FragParent', 1); // sub-floor: a fragment, not 'normal'
+      const { node: fragChild } = makeMeshNode('FragChild', 2); // also sub-floor
+      fragParent.addChild(fragChild); // FragChild's parent is FragParent -- a mesh-bearing FRAGMENT, not a normal node
+      scene.addChild(fragParent);
+
+      const glbPath = path.join(genDir, 'model.glb');
+      await new NodeIO().write(glbPath, doc);
+
+      const result = await splitObjects(glbPath, outDir, new Map(), { triangleFloor: 50 });
+
+      expect(result.objects).toHaveLength(1); // single output object -- no duplicate path/name records
+      const [object] = result.objects;
+      expect(object!.kind).toBe('standaloneFragment');
+      expect(object!.path).toEqual(['FragParent']);
+      expect(object!.mergedFrom).toEqual([{ name: 'FragChild', linkageKey: undefined }]);
+      expect(object!.triangleCount).toBe(3); // 1 (FragParent) + 2 (FragChild)
+
+      const files = await listGlbFiles(outDir);
+      expect(files).toHaveLength(1);
+    } finally {
+      await fsp.rm(genDir, { recursive: true, force: true });
+      await fsp.rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('PR #13 fix-up 2: a three-deep fragment-under-fragment-under-fragment chain resolves to ONE object at the topmost ancestor, no duplicate identities', async () => {
+    // Deterministic bottom-up resolution (see classifyMeshNodes()'s resolveTarget doc
+    // comment): each fragment climbs its own parent chain independently, converging on
+    // whichever real target sits at the top -- here, FragGrandparent itself (its own parent
+    // is the scene root, so nothing above it to climb to).
+    const outDir = await makeTempDir();
+    const genDir = await makeTempDir();
+    try {
+      const doc = new Document();
+      const buffer = doc.createBuffer();
+      const material = doc.createMaterial('Mat').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+      const scene = doc.createScene('Scene');
+      doc.getRoot().setDefaultScene(scene);
+
+      function makeMeshNode(name: string, triangleMultiplier: number): { node: ReturnType<Document['createNode']>; triangleCount: number } {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < triangleMultiplier; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        return { node: doc.createNode(name).setMesh(mesh), triangleCount: triangleMultiplier };
+      }
+
+      const { node: grandparent } = makeMeshNode('FragGrandparent', 1);
+      const { node: parent } = makeMeshNode('FragParent', 2);
+      const { node: child } = makeMeshNode('FragChild', 3);
+      grandparent.addChild(parent);
+      parent.addChild(child);
+      scene.addChild(grandparent);
+
+      const glbPath = path.join(genDir, 'model.glb');
+      await new NodeIO().write(glbPath, doc);
+
+      const result = await splitObjects(glbPath, outDir, new Map(), { triangleFloor: 50 });
+
+      expect(result.objects).toHaveLength(1); // no duplicate identities anywhere in the chain
+      const [object] = result.objects;
+      expect(object!.kind).toBe('standaloneFragment');
+      expect(object!.path).toEqual(['FragGrandparent']);
+      expect(object!.triangleCount).toBe(6); // 1 + 2 + 3
+      expect(object!.mergedFrom?.map((m) => m.name).sort()).toEqual(['FragChild', 'FragParent']);
 
       const files = await listGlbFiles(outDir);
       expect(files).toHaveLength(1);

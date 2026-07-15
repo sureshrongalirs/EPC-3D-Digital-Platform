@@ -355,3 +355,28 @@ addition for `resolveEffectiveRoots()`'s silent fallback (§6, config.ts's new
 `splitterBlobWarnRatio`), the committed `normalHandling.wsl.test.ts` making §3's normals finding
 independently reproducible, and the quantitative A/B re-run + sub-floor ratio calibration point
 (§1, §6). See the PR description's own changelog for the fix-up's complete file list.
+
+**PR #13 fix-up 2 (post-open, addressing a second line-by-line verification pass):** two further
+changes, neither yet covered above:
+
+- `isMagoTilerAvailable()` (§6's bonus fix from fix-up 1) had a residual gap even after that
+  fix: `fs.access()` only checks that *something* exists at `jarPath()`, not that it's a
+  regular file — confirmed directly (`fs.promises.access()` on a plain directory resolves
+  successfully). A misconfigured `MAGO_TILER_JAR` pointing at a directory would still be
+  misreported as "available," the exact bug class fix-up 1 fixed, one level deeper. Closed by
+  switching to `fs.stat().isFile()`, with a dedicated unit test (a real directory at the jar
+  path → unavailable). **Not fully closed**, stated plainly: a real, existing, non-directory
+  file that exists but isn't a genuinely valid jar (corrupt, wrong format) still passes this
+  check and is only caught later by java's own non-zero exit — indistinguishable at the
+  exit-code level from mago's own `--help` parser returning non-zero, which this function
+  already deliberately treats as "available." Fixing that would need parsing java's stderr for
+  a specific error string (fragile across JVM versions) or checking the jar's own magic bytes —
+  out of scope for this fix-up (file-existence/type only, per the exact finding reported).
+- `classifyMeshNodes`'s fragment-under-fragment case (previously "known, deliberately
+  unhandled," §-less until now) is fully resolved: `docs/phase5r/task2-kickoff-amendment.md`
+  item 2's fragment-merge rule is extended to resolve transitively through any depth of
+  fragment-under-fragment chains, converging on whichever real target sits at the top. The
+  `fragmentUnderFragment` warning is retired (not downgraded) — this is no longer an anomalous
+  shape, it's a fully specified, deterministic, tested code path. See the amendment doc's own
+  updated item 2 for the full rule and rationale, and `splitter.test.ts`'s two new tests
+  (single-level fragment-under-fragment, three-deep chain) for the evidence.

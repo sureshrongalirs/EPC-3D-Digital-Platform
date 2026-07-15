@@ -50,6 +50,19 @@ and the decisions they drove aren't left sitting in a chat transcript.
   requirement for Task 2's splitter, with its own dedicated unit test in that task's suite: a
   flat tree, a sub-floor leaf directly under the root, asserting it survives as its own output
   file with its own metadata record rather than being silently absorbed or discarded.
+  **Extended (PR #13 fix-up 2):** "nearest named ancestor" resolves transitively through a
+  chain of fragment-under-fragment-under-fragment of any depth, not just a single level — a
+  fragment whose immediate parent is itself a mesh-bearing fragment (not yet a "normal"-sized
+  object) merges into whatever real target sits at the top of that chain: the nearest normal
+  ancestor if one exists along the way, otherwise the nearest meshless ancestor, otherwise the
+  topmost fragment itself (which then absorbs the whole chain into its own single output
+  object, `mergedFrom[]` listing every descendant). This makes the identity guarantee above
+  ("keep their own identity and their own metadata record") hold precisely even for chains —
+  previously a fragment-under-fragment was "deliberately unhandled," which could produce two
+  metadata records sharing the same `path`/`name` (one for the parent fragment's own object,
+  a separate synthetic group keyed by that same parent) — now structurally impossible, since
+  there is always exactly one merge target per chain. See `splitter.ts`'s `classifyMeshNodes`
+  doc comment and `docs/phase5r/task2-findings.md` for the full rationale and evidence.
 - **FBX compound node names use a `\x00\x01` (NUL+SOH) separator**, not a printable character.
   Any code that compares or splits these names must do so byte-exact against the literal
   `\x00\x01` sequence — never by eyeballing a rendered/terminal-displayed version of the string,

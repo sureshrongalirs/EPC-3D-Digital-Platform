@@ -183,62 +183,86 @@ interface ClassifiedObject {
 
 /**
  * Classifies every mesh-bearing node as a "normal" object (>= triangleFloor) or a fragment,
- * then resolves each fragment's merge target:
+ * then resolves each fragment's ultimate merge target via `resolveTarget` below:
  *
- * - No parent node at all (its immediate parent IS the scene's own root list, i.e. a flat
- *   tree with zero intermediate grouping) -> STANDALONE. Never merged, never dropped -- a
- *   root-level tiny object can be a real, individually-linkage-keyed plant part.
- * - Immediate parent is itself a "normal" mesh-bearing node -> merges INTO that node's own
- *   output object (one file; the parent's own geometry plus every fragment merged into it).
- * - Immediate parent is a meshless pure-group node (the common case: Room/Floor/Building-
- *   style grouping with no mesh of its own) -> merges into a synthetic group object,
- *   identified by the parent's own path, combining every fragment sharing that same parent.
+ * - No mesh-bearing ancestor anywhere above it (climbs all the way to a null parent) ->
+ *   STANDALONE, keyed by the topmost fragment in that chain. Never merged into nothing, never
+ *   dropped -- a root-level tiny object (or a whole chain of them) can be a real,
+ *   individually-linkage-keyed cluster of plant parts.
+ * - Nearest mesh-bearing ancestor is a "normal" node -> merges INTO that node's own output
+ *   object (one file; the normal node's own geometry plus every fragment that climbs to it).
+ * - Nearest mesh-bearing ancestor is ALSO a fragment (PR #13 fix-up 2: extends sign-off item
+ *   4's "ancestor has its own mesh" rule to fragment ancestors too, not just normal ones) ->
+ *   merges into THAT fragment's own resolved target, transitively -- a fragment-under-
+ *   fragment-under-fragment chain of any depth all funnel into whichever real object sits at
+ *   the top: the nearest normal ancestor if one exists along the chain, otherwise the nearest
+ *   meshless ancestor, otherwise the topmost fragment itself. This makes a "duplicate
+ *   path/name metadata record" (one for the parent fragment's own object, a separate one for
+ *   a synthetic group keyed by that same parent) structurally impossible: there is now always
+ *   exactly one merge target per chain, never two records sharing an identity.
+ * - Nearest mesh-bearing ancestor doesn't exist, but a MESHLESS ancestor does (the common
+ *   case: Room/Floor/Building-style grouping with no mesh of its own) -> merges into a
+ *   synthetic group object, identified by that ancestor's own path, combining every fragment
+ *   (or fragment-chain) that climbs to it.
  *
- * Known, deliberately unhandled edge case: a fragment whose immediate parent itself has a
- * mesh but is ALSO sub-floor (a fragment-under-a-fragment) is treated the same as the
- * meshless-group case above -- it does not recursively fold the parent fragment's own
- * geometry into the same output object. Unspecified by the task, and no fixture (synthetic or
- * real) has produced this shape; a warning is emitted if it's ever actually encountered so it
- * doesn't pass silently.
+ * Previously (pre-fix-up-2) a fragment-under-fragment was a "known, deliberately unhandled"
+ * case, folded into the meshless-group path with a dedicated warning and the parent fragment's
+ * own geometry left out of the child's output object entirely. That warning is retired here,
+ * not merely downgraded: this is no longer an unspecified or anomalous shape, it is a fully
+ * resolved, deterministic, tested code path (see splitter.test.ts's fragment-under-fragment and
+ * three-deep-chain tests) -- keeping a warning for routine, correctly-handled behavior would be
+ * exactly the kind of warning-noise this task's own observability additions (PR #13 fix-up 1)
+ * were designed to avoid.
  */
-function classifyMeshNodes(meshNodes: WalkedNode[], pathByNode: Map<Node, string[]>, visitIndexByNode: Map<Node, number>, triangleFloor: number, warnings: string[]): ClassifiedObject[] {
+function classifyMeshNodes(meshNodes: WalkedNode[], pathByNode: Map<Node, string[]>, visitIndexByNode: Map<Node, number>, triangleFloor: number): ClassifiedObject[] {
   const normalNodes = new Set<Node>();
   const fragments: WalkedNode[] = [];
+  const fragmentByNode = new Map<Node, WalkedNode>();
   for (const info of meshNodes) {
     if (info.triangleCount >= triangleFloor) normalNodes.add(info.node);
-    else fragments.push(info);
+    else {
+      fragments.push(info);
+      fragmentByNode.set(info.node, info);
+    }
   }
 
   const mergedIntoNormal = new Map<Node, WalkedNode[]>();
   const groups = new Map<Node, { path: string[]; fragments: WalkedNode[] }>();
-  const standalone: WalkedNode[] = [];
-  const fragmentUnderFragment = new Set<Node>();
+  const standaloneGroups = new Map<Node, WalkedNode[]>();
 
-  for (const fragment of fragments) {
+  /** Deterministic bottom-up resolution: every fragment's target is computed independently
+   * by climbing its OWN parent chain, so re-running against identical input always produces
+   * identical groupings regardless of which order `fragments` happens to be iterated in. A
+   * chain of fragments-under-fragments recurses through this same function once per link,
+   * converging on whichever real target (normal node, meshless node, or the topmost
+   * null-parented fragment) sits at the top -- see this function's own doc comment above. */
+  function resolveTarget(fragment: WalkedNode): { kind: 'normal' | 'meshlessGroup' | 'standalone'; node: Node } {
     const parent = fragment.parentNode;
-    if (parent === null) {
-      standalone.push(fragment);
-      continue;
-    }
-    if (normalNodes.has(parent)) {
-      const list = mergedIntoNormal.get(parent) ?? [];
-      list.push(fragment);
-      mergedIntoNormal.set(parent, list);
-      continue;
-    }
-    if (parent.getMesh()) fragmentUnderFragment.add(parent);
-    let group = groups.get(parent);
-    if (!group) {
-      group = { path: pathByNode.get(parent) ?? [parent.getName()], fragments: [] };
-      groups.set(parent, group);
-    }
-    group.fragments.push(fragment);
+    if (parent === null) return { kind: 'standalone', node: fragment.node };
+    if (normalNodes.has(parent)) return { kind: 'normal', node: parent };
+    const parentFragment = fragmentByNode.get(parent);
+    if (parentFragment) return resolveTarget(parentFragment);
+    return { kind: 'meshlessGroup', node: parent };
   }
 
-  if (fragmentUnderFragment.size > 0) {
-    warnings.push(
-      `${fragmentUnderFragment.size} sub-floor node(s) have a sub-floor parent (fragment-under-fragment) -- an unspecified shape this splitter has never seen in a real or synthetic fixture. Treated as an ordinary meshless-group merge target; the parent fragment's own geometry is NOT folded into the same output object.`,
-    );
+  for (const fragment of fragments) {
+    const target = resolveTarget(fragment);
+    if (target.kind === 'normal') {
+      const list = mergedIntoNormal.get(target.node) ?? [];
+      list.push(fragment);
+      mergedIntoNormal.set(target.node, list);
+    } else if (target.kind === 'standalone') {
+      const list = standaloneGroups.get(target.node) ?? [];
+      list.push(fragment);
+      standaloneGroups.set(target.node, list);
+    } else {
+      let group = groups.get(target.node);
+      if (!group) {
+        group = { path: pathByNode.get(target.node) ?? [target.node.getName()], fragments: [] };
+        groups.set(target.node, group);
+      }
+      group.fragments.push(fragment);
+    }
   }
 
   const objects: ClassifiedObject[] = [];
@@ -254,12 +278,12 @@ function classifyMeshNodes(meshNodes: WalkedNode[], pathByNode: Map<Node, string
     });
   }
 
-  for (const info of standalone) {
+  for (const [rootNode, group] of standaloneGroups) {
     objects.push({
       kind: 'standaloneFragment',
-      path: info.path,
-      sourceNodes: [info],
-      visitIndex: visitIndexByNode.get(info.node)!,
+      path: pathByNode.get(rootNode) ?? [rootNode.getName()],
+      sourceNodes: group,
+      visitIndex: visitIndexByNode.get(rootNode)!,
     });
   }
 
@@ -431,7 +455,7 @@ export async function splitObjects(mergedGlbPath: string, outDir: string, linkag
 
   const warnings: string[] = [];
   const { meshNodes, visitIndexByNode, pathByNode } = walkTree(resolveEffectiveRoots(scene.listChildren(), warnings));
-  const classified = classifyMeshNodes(meshNodes, pathByNode, visitIndexByNode, options.triangleFloor, warnings);
+  const classified = classifyMeshNodes(meshNodes, pathByNode, visitIndexByNode, options.triangleFloor);
 
   // Symptom guard (PR #13 fix-up): catches "thousands of legitimate objects welded into one
   // unsubdividable blob" (docs/phase5r/task2-findings.md §6) by its OUTCOME (one output object

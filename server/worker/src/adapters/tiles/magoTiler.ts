@@ -45,8 +45,18 @@ export async function isMagoTilerAvailable(): Promise<boolean> {
   // this repo to gate on mago-3d-tiler availability without ALSO being gated by assimp
   // unavailability masking it on non-WSL machines). Checking the jar's own existence directly
   // is unambiguous and doesn't depend on interpreting java's process-exit semantics at all.
+  //
+  // fs.stat + isFile(), not fs.access: fs.access only checks that SOMETHING exists at the
+  // path, not that it's a regular file -- confirmed directly (`fs.promises.access()` on a
+  // plain directory resolves successfully). A dangling/misconfigured MAGO_TILER_JAR pointing
+  // at a directory (or any non-file) would pass fs.access, reach the java invocation below,
+  // fail there with a NON-ENOENT error exactly like the missing-file case this function was
+  // just fixed for, and be misreported as "available" all over again -- the identical bug
+  // class one level deeper. isFile() closes that specific gap; it does not (and cannot,
+  // without actually invoking java) verify the file is a genuinely valid, loadable jar.
   try {
-    await fsp.access(jarPath());
+    const stat = await fsp.stat(jarPath());
+    if (!stat.isFile()) return false;
   } catch {
     return false;
   }
