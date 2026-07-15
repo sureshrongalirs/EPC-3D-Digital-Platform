@@ -31,6 +31,9 @@ export interface ConvertContext {
   /** See config.ts's Config.splitterTriangleFloor doc comment -- threaded down to
    * tiles/splitter.ts via tileGlb(). */
   splitterTriangleFloor: number;
+  /** See config.ts's Config.splitterBlobWarnRatio doc comment -- threaded down to
+   * tiles/splitter.ts via tileGlb(). */
+  splitterBlobWarnRatio: number;
 }
 
 export interface ConvertResult {

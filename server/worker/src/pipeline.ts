@@ -80,6 +80,7 @@ export async function processJob(db: Database, config: Config, logger: Logger, m
     dracoForCesium: config.dracoForCesium,
     sizeThresholdMb: config.sizeThresholdMb,
     splitterTriangleFloor: config.splitterTriangleFloor,
+    splitterBlobWarnRatio: config.splitterBlobWarnRatio,
   };
 
   const warnings: string[] = [];

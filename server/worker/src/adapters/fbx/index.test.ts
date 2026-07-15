@@ -53,6 +53,7 @@ describe('fbxAdapter.convert() size routing (CLAUDE.md invariant #4)', () => {
         dracoForCesium: false,
         sizeThresholdMb: 50,
         splitterTriangleFloor: 50,
+        splitterBlobWarnRatio: 0.5,
       };
 
       const result = await fbxAdapter.convert(ctx, { kind: 'fbx', path: 'x', originalName: 'model.fbx', absolutePath: sourcePath });
@@ -83,6 +84,7 @@ describe('fbxAdapter.convert() size routing (CLAUDE.md invariant #4)', () => {
         dracoForCesium: false,
         sizeThresholdMb: 0, // 1KB source > 0MB threshold
         splitterTriangleFloor: 50,
+        splitterBlobWarnRatio: 0.5,
       };
 
       const result = await fbxAdapter.convert(ctx, { kind: 'fbx', path: 'x', originalName: 'model.fbx', absolutePath: sourcePath });

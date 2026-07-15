@@ -78,7 +78,10 @@ export const fbxAdapter: FormatAdapter = {
       // Model node names exactly, 1:1, through to the exported GLB's own node names (confirmed
       // against a real client file, docs/phase5r/task2-kickoff-amendment.md) -- the same
       // parseFBXLinkages() call above already produced this map keyed by that same name.
-      const tilingResult = await tileGlb(rawGlbPath, ctx.outDir, linkageMap, { triangleFloor: ctx.splitterTriangleFloor });
+      const tilingResult = await tileGlb(rawGlbPath, ctx.outDir, linkageMap, {
+        triangleFloor: ctx.splitterTriangleFloor,
+        blobWarnRatio: ctx.splitterBlobWarnRatio,
+      });
       warnings.push(...tilingResult.warnings);
 
       return {

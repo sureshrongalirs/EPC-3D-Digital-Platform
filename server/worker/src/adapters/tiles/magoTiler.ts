@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import fsp from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -33,12 +34,31 @@ export class MagoTilerUnavailableError extends Error {
 }
 
 export async function isMagoTilerAvailable(): Promise<boolean> {
+  // Checked separately from the java invocation below, and BEFORE it: contrary to this
+  // function's own previous doc comment, `execFile('java', ['-jar', jarPath(), ...])` does
+  // NOT surface a missing jar as ENOENT -- ENOENT only ever means "the `java` executable
+  // itself could not be spawned." If `java` is on PATH but jarPath() doesn't exist (e.g. a
+  // dev machine with some other JDK installed, no real mago-3d-tiler jar anywhere), java
+  // starts fine and exits non-zero with its own "Error: Unable to access jarfile" message --
+  // a NUMERIC exit code, which the old `!== 'ENOENT'` check let through as "available"
+  // (confirmed as a real, reachable bug via normalHandling.wsl.test.ts, the first test in
+  // this repo to gate on mago-3d-tiler availability without ALSO being gated by assimp
+  // unavailability masking it on non-WSL machines). Checking the jar's own existence directly
+  // is unambiguous and doesn't depend on interpreting java's process-exit semantics at all.
+  try {
+    await fsp.access(jarPath());
+  } catch {
+    return false;
+  }
+
   try {
     await execFileAsync('java', ['-jar', jarPath(), '--help']);
     return true;
   } catch (err) {
-    // A non-zero exit from --help still proves java + the jar both launched; only ENOENT
-    // (no `java` binary, or the jar path doesn't exist) means the tool truly isn't available.
+    // A non-zero exit from --help (mago-3d-tiler's own CLI parser returning non-zero for
+    // `--help`, for instance) still proves java could launch the jar -- only ENOENT (no
+    // `java` binary at all) means the tool truly isn't available at this point, since the
+    // jar's existence was already confirmed above.
     return (err as NodeJS.ErrnoException).code !== 'ENOENT';
   }
 }

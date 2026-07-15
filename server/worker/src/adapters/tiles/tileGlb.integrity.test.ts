@@ -60,7 +60,7 @@ async function makeRawGlb(dir: string): Promise<string> {
 }
 
 const NO_LINKAGE_MAP = new Map<string, string>();
-const DEFAULT_SPLIT_OPTIONS = { triangleFloor: 50 };
+const DEFAULT_SPLIT_OPTIONS = { triangleFloor: 50, blobWarnRatio: 0.5 };
 
 async function expectRejection(promise: Promise<unknown>): Promise<Error> {
   try {

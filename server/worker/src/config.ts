@@ -29,6 +29,14 @@ export interface Config {
    * normalSegments=4) with margin either direction -- see
    * docs/phase5r/task2-kickoff-amendment.md. */
   splitterTriangleFloor: number;
+  /** Task 2 splitter.ts: if any single output object combines more than this fraction of all
+   * mesh-bearing source objects, a loud warning is pushed naming it (env:
+   * WORKER_SPLITTER_BLOB_WARN_RATIO, default 0.5). This is a symptom guard, not a cause-
+   * specific one -- it catches the "thousands of legitimate fragments welded into one
+   * unsubdividable blob" shape (docs/phase5r/task2-findings.md §6's RootNode-wrapper bug)
+   * regardless of what causes it, including causes this task's own resolveEffectiveRoots()
+   * fix doesn't anticipate. */
+  splitterBlobWarnRatio: number;
 }
 
 /**
@@ -52,5 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pollIntervalMs: Number(env['WORKER_POLL_INTERVAL_MS'] ?? '2000'),
     dracoForCesium: env['WORKER_DRACO_FOR_CESIUM'] === 'true',
     splitterTriangleFloor: Number(env['WORKER_SPLITTER_TRIANGLE_FLOOR'] ?? '50'),
+    splitterBlobWarnRatio: Number(env['WORKER_SPLITTER_BLOB_WARN_RATIO'] ?? '0.5'),
   };
 }

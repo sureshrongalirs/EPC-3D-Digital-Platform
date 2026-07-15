@@ -40,6 +40,8 @@ export interface TileGlbResult {
 export interface TileGlbOptions {
   /** See config.ts's Config.splitterTriangleFloor doc comment. */
   triangleFloor: number;
+  /** See config.ts's Config.splitterBlobWarnRatio doc comment. */
+  blobWarnRatio: number;
 }
 
 /**
@@ -91,7 +93,10 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
   const stagingInputDir = path.join(outDir, 'tiling-input');
   const tilesOutDir = path.join(outDir, 'tiles');
 
-  const splitResult = await splitObjects(rawGlbPath, stagingInputDir, linkageMap, { triangleFloor: options.triangleFloor });
+  const splitResult = await splitObjects(rawGlbPath, stagingInputDir, linkageMap, {
+    triangleFloor: options.triangleFloor,
+    blobWarnRatio: options.blobWarnRatio,
+  });
 
   const warnings: string[] = [...splitResult.warnings];
   let maxTriangleCount = INITIAL_MAX_TRIANGLE_COUNT;

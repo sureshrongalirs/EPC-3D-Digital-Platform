@@ -106,6 +106,7 @@ describe.skipIf(!assimpAvailable || !magoTilerAvailable)(
           pollIntervalMs: 1000,
           dracoForCesium: false,
           splitterTriangleFloor: 50,
+          splitterBlobWarnRatio: 0.5,
         };
 
         const modelId = 'tiles-test-model';

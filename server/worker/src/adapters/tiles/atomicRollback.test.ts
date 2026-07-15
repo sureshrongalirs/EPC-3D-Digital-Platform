@@ -82,6 +82,7 @@ describe.skipIf(!assimpAvailable)('tiles integrity gate: atomic rollback on unre
         pollIntervalMs: 1000,
         dracoForCesium: false,
         splitterTriangleFloor: 50,
+        splitterBlobWarnRatio: 0.5,
       };
 
       const modelId = 'tiles-rollback-test-model';

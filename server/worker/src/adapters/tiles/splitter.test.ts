@@ -194,7 +194,7 @@ describe('splitObjects (Task 2 per-object pipeline reshape)', () => {
     }
   });
 
-  it('a meshless single top-level node that is NOT named "RootNode" (e.g. a real single-building site) is kept as a real grouping ancestor, not stripped', async () => {
+  it('a meshless single top-level node that is NOT named "RootNode" (e.g. a real single-building site) is kept as a real grouping ancestor, not stripped -- and gets the informational (not stripped) warning, since resolveEffectiveRoots() cannot itself tell this apart from a renamed wrapper', async () => {
     // Guards the narrow scope of the RootNode-stripping fix above: a legitimate single-
     // building site is also "one meshless node, sole scene child" but must still be a valid
     // fragment-merge target, unlike assimp's synthetic wrapper.
@@ -208,6 +208,76 @@ describe('splitObjects (Task 2 per-object pipeline reshape)', () => {
       expect(result.objects).toHaveLength(1);
       expect(result.objects[0]!.kind).toBe('mergedFragmentGroup');
       expect(result.objects[0]!.path).toEqual(['Building_0', 'Floor_0', 'Room_0']);
+
+      // PR #13 fix-up: the "not stripped" informational warning must fire here -- this shape
+      // (sole meshless top-level child, not named "RootNode") is indistinguishable from a
+      // renamed/different wrapper purely by structure, so resolveEffectiveRoots() always warns
+      // on it. This is expected and correct, not a false positive to suppress.
+      const notStrippedWarning = result.warnings.find((w) => w.includes('is meshless but not named "RootNode"'));
+      expect(notStrippedWarning).toBeDefined();
+      expect(notStrippedWarning).toContain('Building_0');
+    } finally {
+      await fsp.rm(genDir, { recursive: true, force: true });
+      await fsp.rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blob-ratio symptom guard: a differently-named wrapper (heuristic bypassed) that welds most of the model into one merged group still gets caught, independent of resolveEffectiveRoots() recognizing the cause', async () => {
+    // Reconstructs the RootNode-wrapper bug's SHAPE (most fragments funneled into one output
+    // object because their real parent wrapper wasn't recognized/stripped) but under a wrapper
+    // named "SceneRoot" instead of "RootNode" -- resolveEffectiveRoots() will NOT strip this
+    // (by design, see its own doc comment), so this exercises the second, cause-agnostic line
+    // of defense: the blob-ratio guard must fire regardless of why the objects ended up
+    // funneled into one file, not only for the one specific cause this task's fix addresses.
+    const outDir = await makeTempDir();
+    const genDir = await makeTempDir();
+    try {
+      const doc = new Document();
+      const buffer = doc.createBuffer();
+      const material = doc.createMaterial('Mat').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+      const scene = doc.createScene('Scene');
+      doc.getRoot().setDefaultScene(scene);
+
+      function addLeaf(parent: ReturnType<Document['createNode']>, name: string, triangleCount: number): void {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < triangleCount; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        const node = doc.createNode(name).setMesh(mesh);
+        parent.addChild(node);
+      }
+
+      const wrapper = doc.createNode('SceneRoot'); // meshless, sole scene child -- NOT "RootNode"
+      scene.addChild(wrapper);
+      for (let i = 0; i < 10; i++) addLeaf(wrapper, `Frag_${i}`, 1); // 10 fragments, well below the floor
+      addLeaf(wrapper, 'BigTank', 100); // 2 normal objects, well above the floor
+      addLeaf(wrapper, 'BigValve', 100);
+
+      const glbPath = path.join(genDir, 'model.glb');
+      await new NodeIO().write(glbPath, doc);
+
+      const result = await splitObjects(glbPath, outDir, new Map(), { triangleFloor: 50 });
+
+      // Sanity: the heuristic really didn't strip "SceneRoot" -- confirms this test actually
+      // reconstructs the bypassed-heuristic shape rather than accidentally not exercising it.
+      expect(result.objects.some((o) => o.path[0] === 'SceneRoot')).toBe(true);
+
+      const group = result.objects.find((o) => o.kind === 'mergedFragmentGroup');
+      expect(group).toBeDefined();
+      expect(group!.mergedFrom).toHaveLength(10); // all 10 fragments welded into one file
+
+      // totalMeshObjects = 10 fragments + 2 normals = 12; the group's 10 constituents is
+      // 83.3%, over the default 50% blobWarnRatio threshold.
+      const blobWarning = result.warnings.find((w) => w.includes('combines') && w.includes('total mesh-bearing source object'));
+      expect(blobWarning).toBeDefined();
+      expect(blobWarning).toContain('10 of 12');
     } finally {
       await fsp.rm(genDir, { recursive: true, force: true });
       await fsp.rm(outDir, { recursive: true, force: true });

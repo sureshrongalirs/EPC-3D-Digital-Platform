@@ -20,6 +20,23 @@ spike), split-mode input (a directory of per-object GLBs from `splitter.ts`):
 - **Without** them (current `magoTiler.ts`, since Task 0/1): real, spatially-subdivided,
   budget-compliant tiles, matching Task 0's 142-tile directory-mode result.
 
+**Quantitative re-run (PR #13 fix-up item 3):** the original A/B above was recorded
+qualitatively only. Re-run in WSL with the original logs no longer available, same JAR, same
+`-tv 1.1 -mx 5000` base flags, against `generatePlantGridFixture(dir, 'split', 500, 7)` (this
+repo's own committed fixture generator, split mode — 500 separate per-object GLBs, 6.26MB
+total, this task's actual production input shape):
+
+| Run | Command | Exit code | `Total tile contents count` | `data/` file count | Largest tile |
+|---|---|---|---|---|---|
+| **With** `-nl 3 -xl 8 -mg 100` | `java -jar mago-3d-tiler.jar -input <dir> -output <dir> -inputType glb -outputType b3dm -tv 1.1 -mx 5000 -nl 3 -xl 8 -mg 100` | 0 | **0** | **0** | — |
+| **Without** (current) | `java -jar mago-3d-tiler.jar -input <dir> -output <dir> -inputType glb -outputType b3dm -tv 1.1 -mx 5000` | 0 | **24** | **24** | 1.8MB (well under the 8MB budget) |
+
+Both runs exit 0 and produce a structurally well-formed `tileset.json` — the "with flags" run's
+failure is invisible to a bare exit-code check, which is precisely why Task 1's integrity gate
+walks the tree for real content rather than trusting mago's own exit status. Raw mago summary
+block, "with" run: `Total tile contents count : 0 / Total tileset.json File Size : 10KB`; "without"
+run: `Total tile contents count : 24 / Total tileset.json File Size : 5KB`.
+
 This reconfirms the existing `magoTiler.ts` doc comment's conclusion; the flags are not just
 inert for split-mode input, they actively break it. No flag change made — `magoTiler.ts` already
 omits them.
@@ -67,9 +84,27 @@ non-trivial matrix to (mis)decompose. This eliminates decomposition from the ent
 than relocating it into mago's own (provably lossy) matrix reader, which is the true intent
 behind the original sign-off item 2. Re-verified above (Path B).
 
-## 3. Rider 1 — normals: unit length survives; smooth per-vertex data does not
+## 3. Rider 1 — normals: baking is correct; mago discards it and flat-recomputes anyway
 
-Two real-mago checks, both against baked (Path B–style) split output:
+**Reproducible, not folklore (PR #13 fix-up item 2):** the evidence below was originally
+gathered via ad-hoc WSL scripts during implementation, not preserved anywhere. It is now a
+committed, WSL-gated, re-runnable test —
+`server/worker/src/adapters/tiles/normalHandling.wsl.test.ts` — that any engineer with a real
+`mago-3d-tiler` binary can run directly (`pnpm test -- normalHandling.wsl.test.ts`) to
+reproduce this finding, not just read about it.
+
+**Claim 1 — the baking math itself (pre-mago) is correct.** This is proven independently of
+mago entirely by `worldTransform.test.ts`'s divergence test ("under NON-UNIFORM scale, naively
+transforming a normal by the same matrix as positions gives the WRONG direction"), which
+computes both the naive (position-matrix) and correct (inverse-transpose) normal transforms
+under a non-uniform scale, asserts they disagree, and cross-checks the correct one against the
+independently-known closed form for a diagonal scale matrix (`diag(1/sx, 1/sy, 1/sz)`).
+`splitter.test.ts`'s "world transform correctness" test additionally proves `bakeNormalAccessor`
+itself reaches that same correct value end-to-end (source GLB → `splitObjects()` → read-back).
+Neither test touches mago — this claim does not depend on mago's behavior at all.
+
+**Claim 2 — mago discards the baked `NORMAL` attribute post-mago, and flat-recomputes instead.**
+Two real-mago checks, both against baked (correct, per Claim 1) split output:
 
 **a) Orientation via geometric perpendicularity check** (rotated+scaled single-triangle fixture,
 arbitrary non-geometric raw local normal `(0,0,1)` deliberately chosen so it is *not* the
@@ -86,21 +121,28 @@ transform composed purely of rotation/permutation (angle-preserving) — it wasn
 normal instead landed exactly on the geometric face normal of mago's own output triangle.
 
 **b) Direct confirmation — three deliberately distinct per-vertex normals**, none equal to the
-flat face normal (simulating smooth shading across a curved surface):
+flat face normal (simulating smooth shading across a curved surface). This is exactly what
+`normalHandling.wsl.test.ts` now asserts directly, not just this doc's narrative:
 
 - Input: `v0=(0.267,0.535,0.802)`, `v1=(-0.302,0.905,0.302)`, `v2=(0.456,-0.570,0.684)`.
-- Mago tile content output: **all three vertices** `(0.0000, 0.0000, 1.0000)` — identical, and
-  exactly the flat geometric normal of that (axis-aligned, post-mago) triangle.
+- Mago tile content output: **all three vertices** identical — exactly the flat geometric normal
+  of that (post-mago) triangle, unit length, confirmed both by dot-product-against-geometric-
+  normal (this doc's original evidence, axis-aligned example: `(0.0000, 0.0000, 1.0000)`) and by
+  the committed test's own general (non-axis-aligned) cross-product check.
 
 **Finding:** mago-3d-tiler does not pass through per-vertex `NORMAL` data at all — it discards
 whatever is supplied and recomputes flat, per-face geometric normals from output positions. Unit
 length trivially "survives" (it's a freshly-computed unit normal, not a preserved one), but
 **no smooth-shading information survives split-mode tiling through mago, regardless of what this
-worker bakes into `NORMAL`.** This is a real, confirmed mago limitation — the baking math itself
-is independently verified correct (matches the closed-form inverse-transpose expectation exactly
-pre-mago, see 3a row 1), it is simply discarded downstream. `bakeNormalAccessor` is kept as
-implemented (correct, harmless, and the source of truth if mago's behavior changes or another
-consumer reads the pre-mago intermediate).
+worker bakes into `NORMAL`.** This is a real, confirmed mago limitation, downstream of and
+unrelated to Claim 1's correctness. `bakeNormalAccessor` is **kept as implemented** — not because
+it currently affects what a client renders (it doesn't; mago discards it), but because it is
+**(a) the source of truth for the normal-restoration follow-up** (§7/PR description: a future
+post-tiling pass that re-attaches each tile's correctly-baked `NORMAL` data, once written, has
+nothing to compute from if this baking step is removed), and **(b) needed regardless of tiling
+for any future per-object GLB serving path** (e.g. a non-tiled single-object download/preview)
+that would read the splitter's own intermediate output directly, where mago never runs at all
+and the baked `NORMAL` is exactly correct as-is.
 
 **Product-visible impact, stated plainly for Task 3 verification to expect:** every curved
 plant-geometry surface — pipes, elbows, vessel heads, anything relying on smooth per-vertex
@@ -239,6 +281,42 @@ individually — 3,201 `standaloneFragment` + 1,309 `normal`, zero incorrect mer
 with a `linkageKey` (matching the kickoff-amendment's own linkage-coverage finding), correct
 bare-name `file`/`path` throughout (e.g. `Object_6.glb`, not `RootNode__Object_6.glb`).
 
+**Real-data calibration point for `triangleFloor` (PR #13 fix-up item 3):** on this real file,
+**3,201 of 4,510 objects (71.0%)** fall below the default 50-triangle floor and classify as
+fragments. This is a genuinely high sub-floor ratio, not a fixture artifact — real plant models
+apparently have far more small/simple parts (bolts, brackets, gaskets, small fittings) than
+large ones. Two direct consequences worth recording alongside the default itself, for whoever
+next tunes `WORKER_SPLITTER_TRIANGLE_FLOOR`: (1) the default of 50 was chosen against synthetic
+fixture density (`docs/phase5r/task2-kickoff-amendment.md`), not real-world sub-floor
+prevalence — it happens to produce a sensible split on this file, but a 71% fragment rate is the
+actual real-world baseline to calibrate future changes against, not an edge case; (2) this ratio
+is also *why* the RootNode-wrapper bug above was so damaging before its fix — with roughly
+seven-tenths of all real objects landing in the fragment path, funneling all of them into one
+unstripped-wrapper merge target produces a blob dominating the vast majority of the model by
+object count, exactly the shape the new blob-ratio guard (below) is calibrated to catch by
+default (`blobWarnRatio: 0.5` — well under 71%).
+
+**Observability fix-up (PR #13, verdict item #15):** the original fix above was flagged as
+having a silent failure mode — `resolveEffectiveRoots()` had no way to signal when its narrow
+`"RootNode"`-name anchor didn't match, so a future renamed/different wrapper would silently
+reproduce this exact bug with no warning anywhere. Two independent layers added:
+
+1. **Informational warning** when a sole meshless top-level scene child exists but isn't
+   literally named `"RootNode"` — names the node, states its descendants will carry it as a
+   real path segment. This is *not* an error signal on its own (a genuine single-building site
+   has the identical shape and is legitimately not stripped — see
+   `splitter.test.ts`'s extended regression test) — it's a heads-up that the heuristic's
+   assumption didn't fire, without claiming to know why.
+2. **Blob-ratio symptom guard** (`WORKER_SPLITTER_BLOB_WARN_RATIO`, default `0.5`) — cause-
+   agnostic: if any single output object combines more than this fraction of all mesh-bearing
+   source objects, a loud warning names it, regardless of *why* they ended up funneled together
+   (an unrecognized wrapper name, a future classification bug, or a real but unusually
+   concentrated fragment cluster). This is the layer that would have caught the original
+   3,201-object blob directly by its symptom, even without knowing "RootNode" was the cause —
+   see `splitter.test.ts`'s "blob-ratio symptom guard" test, which reconstructs the wrapper-bug
+   shape under a differently-named wrapper (`"SceneRoot"`, deliberately not recognized by
+   `resolveEffectiveRoots()`) and confirms the guard fires independent of the name-based fix.
+
 ## 7. Real-file run confirms the already-documented Draco-for-tiles gap is real, not theoretical
 
 After the fix above, the same real-file run still finishes successfully (no exception — this is
@@ -270,3 +348,10 @@ production-code change made *during this doc's own writing* (as opposed to earli
 `splitter.ts`'s `resolveEffectiveRoots()` (section 6 above), added specifically because the real
 client file's own findings, gathered while writing this doc, demanded it — not a hypothetical
 improvement.
+
+**PR #13 fix-up (post-open, addressing an independent verification pass's findings):** three
+further changes, all covered above at their respective sections — the two-layer observability
+addition for `resolveEffectiveRoots()`'s silent fallback (§6, config.ts's new
+`splitterBlobWarnRatio`), the committed `normalHandling.wsl.test.ts` making §3's normals finding
+independently reproducible, and the quantitative A/B re-run + sub-floor ratio calibration point
+(§1, §6). See the PR description's own changelog for the fix-up's complete file list.

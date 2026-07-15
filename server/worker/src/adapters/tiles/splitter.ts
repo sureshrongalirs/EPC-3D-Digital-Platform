@@ -37,7 +37,17 @@ export interface SplitOptions {
   /** Nodes with fewer triangles than this are "fragments" that merge into their nearest
    * named ancestor rather than becoming their own output object. */
   triangleFloor: number;
+  /** See config.ts's Config.splitterBlobWarnRatio doc comment. Optional (defaults to
+   * DEFAULT_BLOB_WARN_RATIO below) since most callers of this module -- in particular the
+   * large majority of this file's own unit tests -- have no stake in this specific guard and
+   * shouldn't need to plumb a value through just to construct valid options. */
+  blobWarnRatio?: number;
 }
+
+/** Default for SplitOptions.blobWarnRatio when a caller doesn't supply one -- matches
+ * config.ts's Config.splitterBlobWarnRatio default exactly, so an unconfigured real run and
+ * an options-light test both get the same guard behavior. */
+const DEFAULT_BLOB_WARN_RATIO = 0.5;
 
 export interface MergedSourceRef {
   name: string;
@@ -111,15 +121,31 @@ function triangleCountOf(node: Node): number {
  * this was reversed on real-file evidence gathered *after* that sign-off, without a check-back
  * before implementing (see the Task 2 PR description's deviations section). The name
  * "RootNode" is assimp's own convention, not a glTF or FBX standard -- this heuristic is
- * therefore assimp-specific and silently stops firing (falling back to the pre-fix, path-
- * inclusive behavior) if the FBX->GLB exporter this worker shells out to (assimp.ts) is ever
- * swapped for a different tool. Revisit this function if that happens.
+ * therefore assimp-specific and stops firing (falling back to the pre-fix, path-inclusive
+ * behavior) if the FBX->GLB exporter this worker shells out to (assimp.ts) is ever swapped for
+ * a different tool. Revisit this function if that happens.
+ *
+ * OBSERVABILITY (PR #13 fix-up): a fallback that stops firing is no longer *silent* --
+ * `scene.listChildren().length > 1` (multi-root) is the healthy common case and never warns,
+ * but a sole MESHLESS top-level child that isn't literally named "RootNode" pushes an
+ * informational warning, since that shape is exactly the one this function is designed to
+ * recognize and might just not be anticipating a renamed/different wrapper. This alone doesn't
+ * prove anything went wrong (a real single-building site has the identical shape and is
+ * correctly left alone) -- it is a heads-up, not an error. The load-bearing catch for the
+ * actual failure mode (thousands of fragments welded into one oversized blob, regardless of
+ * *why* they weren't split standalone) is the separate, cause-agnostic blob-ratio guard in
+ * `splitObjects()`'s own write loop below.
  */
-function resolveEffectiveRoots(sceneChildren: Node[]): Node[] {
+function resolveEffectiveRoots(sceneChildren: Node[], warnings: string[]): Node[] {
   const [only] = sceneChildren;
-  if (sceneChildren.length === 1 && only!.getName() === 'RootNode' && !only!.getMesh()) {
-    return only!.listChildren();
-  }
+  if (sceneChildren.length !== 1) return sceneChildren; // multi-root: the healthy common case, never warn
+  if (only!.getMesh()) return sceneChildren; // has its own mesh -- not a pure-wrapper candidate at all
+
+  if (only!.getName() === 'RootNode') return only!.listChildren();
+
+  warnings.push(
+    `sole top-level scene child "${only!.getName()}" is meshless but not named "RootNode" -- not stripped as an export-tool wrapper (resolveEffectiveRoots() only recognizes that literal name). Every object beneath it will carry "${only!.getName()}" as a real path segment (and therefore a filename prefix) rather than the tree degrading to bare names on this branch. This is expected and correct if "${only!.getName()}" is a genuine single top-level grouping (e.g. a single-building site) -- but if it is actually a synthetic wrapper from a different exporter, this heuristic needs extending rather than silently mis-splitting the way the unstripped "RootNode" case did before this task's fix (docs/phase5r/task2-findings.md §6).`,
+  );
   return sceneChildren;
 }
 
@@ -404,8 +430,17 @@ export async function splitObjects(mergedGlbPath: string, outDir: string, linkag
   if (!scene) throw new Error(`${mergedGlbPath} has no scene to split`);
 
   const warnings: string[] = [];
-  const { meshNodes, visitIndexByNode, pathByNode } = walkTree(resolveEffectiveRoots(scene.listChildren()));
+  const { meshNodes, visitIndexByNode, pathByNode } = walkTree(resolveEffectiveRoots(scene.listChildren(), warnings));
   const classified = classifyMeshNodes(meshNodes, pathByNode, visitIndexByNode, options.triangleFloor, warnings);
+
+  // Symptom guard (PR #13 fix-up): catches "thousands of legitimate objects welded into one
+  // unsubdividable blob" (docs/phase5r/task2-findings.md §6) by its OUTCOME (one output object
+  // dominating the total mesh-object count), not by trying to enumerate every possible cause
+  // the way resolveEffectiveRoots()'s own informational warning does -- this fires regardless
+  // of whether the cause is an unrecognized wrapper name, a future classification bug, or
+  // something not yet anticipated.
+  const blobWarnRatio = options.blobWarnRatio ?? DEFAULT_BLOB_WARN_RATIO;
+  const totalMeshObjects = meshNodes.length;
 
   const tracker = createCollisionTracker();
   const io = new NodeIO();
@@ -418,6 +453,13 @@ export async function splitObjects(mergedGlbPath: string, outDir: string, linkag
 
     const triangleCount = object.sourceNodes.reduce((sum, n) => sum + n.triangleCount, 0);
     const primaryName = object.path[object.path.length - 1] ?? object.sourceNodes[0]!.node.getName();
+
+    const constituentCount = object.sourceNodes.length;
+    if (totalMeshObjects > 0 && constituentCount > blobWarnRatio * totalMeshObjects) {
+      warnings.push(
+        `output object "${file}" (path: ${object.path.join('/')}) combines ${constituentCount} of ${totalMeshObjects} total mesh-bearing source object(s) (${((constituentCount / totalMeshObjects) * 100).toFixed(1)}%, over the ${(blobWarnRatio * 100).toFixed(0)}% threshold) into a single tile file -- this is the shape of the RootNode-wrapper bug this task fixed (docs/phase5r/task2-findings.md §6). A real, intentionally large fragment cluster is possible, but this magnitude warrants a manual look before trusting the split, not silent acceptance.`,
+      );
+    }
 
     if (object.kind === 'mergedFragmentGroup') {
       objects.push({

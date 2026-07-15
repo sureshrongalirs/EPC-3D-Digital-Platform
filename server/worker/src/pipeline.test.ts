@@ -29,6 +29,7 @@ async function makeConfig(dataDir: string): Promise<Config> {
     pollIntervalMs: 1000,
     dracoForCesium: false,
     splitterTriangleFloor: 50,
+    splitterBlobWarnRatio: 0.5,
   };
 }
 
