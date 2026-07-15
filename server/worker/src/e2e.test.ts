@@ -74,6 +74,7 @@ describe.skipIf(!assimpAvailable)('E2E: FBX -> GLB -> linkage map -> catalog (sk
         sizeThresholdMb: 100,
         pollIntervalMs: 1000,
         dracoForCesium: false,
+        splitterTriangleFloor: 50,
       };
 
       const modelId = 'e2e-model';

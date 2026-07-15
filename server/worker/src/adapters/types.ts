@@ -28,6 +28,9 @@ export interface ConvertContext {
   /** CLAUDE.md invariant #4's size routing threshold, in MB: a source at or under this goes
    * to a single GLB, larger goes to the OGC 3D Tiles path (see fbx/index.ts's convert()). */
   sizeThresholdMb: number;
+  /** See config.ts's Config.splitterTriangleFloor doc comment -- threaded down to
+   * tiles/splitter.ts via tileGlb(). */
+  splitterTriangleFloor: number;
 }
 
 export interface ConvertResult {

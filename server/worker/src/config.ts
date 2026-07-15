@@ -21,6 +21,14 @@ export interface Config {
    * this flag exists so that path (or a future fix to the decoder mismatch) can turn
    * compression back on without code changes. */
   dracoForCesium: boolean;
+  /** Task 2 splitter.ts: a mesh-bearing node with fewer triangles than this is a "fragment"
+   * that merges into its nearest named ancestor rather than becoming its own tile (env:
+   * WORKER_SPLITTER_TRIANGLE_FLOOR, default 50). 50 sits comfortably between
+   * generateHierarchyFixture's fragment density (12 triangles at its default
+   * fragmentSegments=1) and normal-object density (192 triangles at its default
+   * normalSegments=4) with margin either direction -- see
+   * docs/phase5r/task2-kickoff-amendment.md. */
+  splitterTriangleFloor: number;
 }
 
 /**
@@ -43,5 +51,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sizeThresholdMb: Number(env['SIZE_THRESHOLD_MB'] ?? '50'),
     pollIntervalMs: Number(env['WORKER_POLL_INTERVAL_MS'] ?? '2000'),
     dracoForCesium: env['WORKER_DRACO_FOR_CESIUM'] === 'true',
+    splitterTriangleFloor: Number(env['WORKER_SPLITTER_TRIANGLE_FLOOR'] ?? '50'),
   };
 }

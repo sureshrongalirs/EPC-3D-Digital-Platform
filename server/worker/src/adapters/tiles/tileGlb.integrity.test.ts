@@ -35,17 +35,10 @@ async function makeTempDir(): Promise<string> {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'plantscope-tileglb-integrity-'));
 }
 
-async function makeRawGlb(dir: string): Promise<string> {
-  const rawGlbPath = path.join(dir, 'model.glb');
-  // tileGlb only ever renames this file into a staging dir; its content is never parsed, so
-  // any bytes are fine.
-  await fsp.writeFile(rawGlbPath, Buffer.from([0]));
-  return rawGlbPath;
-}
-
-/** A minimal, real, parseable GLB -- repairTileset() (case (b)) reads actual GLB geometry to
- * compute a bounding volume, so its test fixture can't be arbitrary bytes the way the case
- * (c) fixtures below can (those paths never reach repair/GLB-parsing code at all). */
+/** A minimal, real, parseable GLB -- Task 2's splitter genuinely parses `rawGlbPath` now (it's
+ * no longer a blind rename), and repairTileset() (case (b)) separately reads actual GLB
+ * geometry to compute a bounding volume, so no test fixture in this file can be arbitrary
+ * bytes the way it could before Task 2. */
 async function writeTestGlb(glbPath: string): Promise<void> {
   const doc = new Document();
   const buffer = doc.createBuffer();
@@ -59,6 +52,15 @@ async function writeTestGlb(glbPath: string): Promise<void> {
   doc.createScene('Scene').addChild(node);
   await new NodeIO().write(glbPath, doc);
 }
+
+async function makeRawGlb(dir: string): Promise<string> {
+  const rawGlbPath = path.join(dir, 'model.glb');
+  await writeTestGlb(rawGlbPath);
+  return rawGlbPath;
+}
+
+const NO_LINKAGE_MAP = new Map<string, string>();
+const DEFAULT_SPLIT_OPTIONS = { triangleFloor: 50 };
 
 async function expectRejection(promise: Promise<unknown>): Promise<Error> {
   try {
@@ -95,7 +97,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
       expect(err.message).toContain('exit code 1');
       expect(err.message).toContain('Tileset root node children is null or empty');
 
@@ -118,7 +120,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: 'done, nothing written\n', stderr: '' };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
       expect(err.message).toContain('no tileset.json was produced');
       expect(err.message).toContain('exit code 0');
     } finally {
@@ -139,7 +141,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: 'wrote 2 tiles, no tileset\n', stderr: '' };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
       expect(err.message).toContain('no tileset.json was produced');
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
@@ -158,14 +160,14 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: '', stderr: '' };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
       expect(err.message).toContain('tileset.json is malformed');
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
   });
 
-  it('case (b): a tileset.json referencing a missing tile is repaired (regenerated from survivors) and published rather than failed', async () => {
+  it('case (b), Task 2 policy: a tileset.json referencing a missing tile still repairs successfully at the tilesetIntegrity.ts layer (repairTileset really does regenerate from survivors), but tileGlb() escalates that success into a job failure -- split-mode input should never need repair', async () => {
     const dir = await makeTempDir();
     try {
       const rawGlb = await makeRawGlb(dir);
@@ -183,12 +185,15 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: '', stderr: '' };
       });
 
-      const result = await tileGlb(rawGlb, outDir);
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
 
-      const raw = await fsp.readFile(result.tilesetPath, 'utf-8');
-      const tileset = JSON.parse(raw) as { root: { children?: { content?: { uri: string } }[]; content?: unknown } };
-      expect(tileset.root.children?.map((c) => c.content?.uri)).toEqual(['good.glb']);
-      expect(result.warnings.some((w) => w.includes('repaired tileset.json'))).toBe(true);
+      // repairTileset() itself was called and genuinely succeeded (Task 1's mechanism is
+      // unchanged) -- the failure is tileGlb()'s own policy escalation on top, not a
+      // repairTileset()/tilesetIntegrity.ts regression.
+      expect(mockedRepairTileset).toHaveBeenCalledTimes(1);
+      expect(err.message).toContain('split-mode tiling required a tileset repair');
+      expect(err.message).toContain('FAILED run for split-mode input, not a warning');
+      expect(err.message).toContain('missing.glb');
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
@@ -206,7 +211,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: '', stderr: '' };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
       expect(err.message).toContain('tileset references no content');
       expect(err.message).toContain('exit code 0');
 
@@ -217,6 +222,47 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
       // same mago invocation at a lower triangle count wouldn't manufacture content that
       // was never there.
       expect(mockedRunMagoTiler).toHaveBeenCalledTimes(1);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('policy: an oversized tile that persists at the minimum LOD depth, with NO repair needed, PUBLISHES with a structured warning rather than failing the job', async () => {
+    const dir = await makeTempDir();
+    try {
+      const rawGlb = await makeRawGlb(dir);
+      const outDir = path.join(dir, 'out');
+      // Every call to mago-3d-tiler returns exactly one, always-oversized (>8MB) tile,
+      // regardless of the -mx value tileGlb() retries with -- deterministically forces the
+      // backoff loop all the way down to MIN_MAX_TRIANGLE_COUNT (500) and the "give up" branch.
+      const oversizedContent = Buffer.alloc(9 * 1024 * 1024, 1);
+
+      mockedRunMagoTiler.mockImplementation(async (_inputDir, outputDir) => {
+        await fsp.mkdir(outputDir, { recursive: true });
+        await fsp.writeFile(path.join(outputDir, 'big.glb'), oversizedContent);
+        await fsp.writeFile(path.join(outputDir, 'tileset.json'), JSON.stringify({ root: { content: { uri: 'big.glb' } } }));
+        return { exitCode: 0, stdout: '', stderr: '' };
+      });
+
+      const result = await tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS);
+
+      // Published: tilesetPath exists and points at the (still oversized) real tile.
+      const raw = await fsp.readFile(result.tilesetPath, 'utf-8');
+      const tileset = JSON.parse(raw) as { root: { content?: { uri: string } } };
+      expect(tileset.root.content?.uri).toBe('big.glb');
+
+      // Structured warning, not silence -- names the offending tile and its size.
+      const warning = result.warnings.find((w) => w.includes('exceed the 8MB-per-tile budget'));
+      expect(warning).toBeDefined();
+      expect(warning).toContain('big.glb');
+      expect(warning).toContain('maxTriangleCount=500'); // MIN_MAX_TRIANGLE_COUNT, confirms the floor was reached
+
+      // No repair was needed for this tileset (content present, just large) -- the repair-
+      // escalates-to-failure policy (case (b) test above) must not have fired here.
+      expect(mockedRepairTileset).not.toHaveBeenCalled();
+
+      // Backoff actually happened -- more than one attempt before giving up at the floor.
+      expect(mockedRunMagoTiler.mock.calls.length).toBeGreaterThan(1);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
@@ -235,7 +281,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: '', stderr: '' };
       });
 
-      const result = await tileGlb(rawGlb, outDir);
+      const result = await tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS);
 
       const raw = await fsp.readFile(result.tilesetPath, 'utf-8');
       const tileset = JSON.parse(raw) as { root: { content?: { uri: string } } };
@@ -265,7 +311,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { exitCode: 0, stdout: '', stderr: '' };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
 
       // Contrast with the zero-content test: this DOES have content references, so repair is
       // attempted (case (b)) -- it just converges to nothing, which is itself a failure. This
@@ -304,7 +350,7 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
         return { kept: [], dropped: ['gone.glb'] };
       });
 
-      const err = await expectRejection(tileGlb(rawGlb, outDir));
+      const err = await expectRejection(tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS));
 
       expect(mockedRepairTileset).toHaveBeenCalledTimes(1);
       // This message comes from index.ts's own post-repair check, not repairTileset -- the

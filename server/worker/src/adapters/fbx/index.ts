@@ -70,14 +70,15 @@ export const fbxAdapter: FormatAdapter = {
     const sourceSizeMB = sourceStat.size / (1024 * 1024);
 
     if (sourceSizeMB > ctx.sizeThresholdMb) {
-      // Identity preservation for tiles: mago-3d-tiler's batch-table node naming can't be
-      // verified against a real run in this environment (no Java/mago-3d-tiler binary
-      // available to inspect its actual output) -- so rather than guess at extracting
-      // linkage keys from its batch tables, this reuses the linkageMap already recovered
-      // above from the *source FBX itself* (the same parseFBXLinkages() call the GLB path
-      // uses), which is proven correct independent of whatever mago-3d-tiler does to node
-      // names internally.
-      const tilingResult = await tileGlb(rawGlbPath, ctx.outDir);
+      // Identity preservation for tiles (Task 2): tileGlb() -> splitter.ts explodes the
+      // merged GLB into one file per object and looks up each object's linkage key directly
+      // in this same linkageMap, matched by node NAME -- not derived from mago-3d-tiler's own
+      // output at all (mago never sees or produces linkage information; it only sees the
+      // already-split GLBs splitter.ts hands it). This is safe because assimp preserves FBX
+      // Model node names exactly, 1:1, through to the exported GLB's own node names (confirmed
+      // against a real client file, docs/phase5r/task2-kickoff-amendment.md) -- the same
+      // parseFBXLinkages() call above already produced this map keyed by that same name.
+      const tilingResult = await tileGlb(rawGlbPath, ctx.outDir, linkageMap, { triangleFloor: ctx.splitterTriangleFloor });
       warnings.push(...tilingResult.warnings);
 
       return {

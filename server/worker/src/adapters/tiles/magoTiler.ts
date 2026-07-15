@@ -62,10 +62,11 @@ export interface MagoTilerResult {
 }
 
 /** Runs `java -jar mago-3d-tiler.jar -input <inputDir> -output <outputDir> -inputType glb
- * -outputType b3dm -tv 1.1 -mx <maxTriangleCount> -nl 3 -xl 8 -mg 100`. mago-3d-tiler takes a
- * *directory* as input (it globs by -inputType inside it), not a single file path -- callers
- * are expected to have already staged the intermediate GLB alone in its own directory.
- * Produces `{outputDir}/tileset.json` plus the tile files themselves on success -- see
+ * -outputType b3dm -tv 1.1 -mx <maxTriangleCount>`. mago-3d-tiler takes a *directory* as input
+ * (it globs by -inputType inside it), not a single file path -- callers are expected to have
+ * already staged the input as a directory of per-object GLBs (Task 2's splitter.ts; a single
+ * merged GLB never subdivides at all regardless of flags, see below). Produces
+ * `{outputDir}/tileset.json` plus the tile files themselves on success -- see
  * TILE_CONTENT_EXTENSIONS in ../tiles/index.ts for why those are actually named .glb despite
  * -outputType being 'b3dm' (confirmed against a real run).
  *
@@ -101,26 +102,24 @@ export async function runMagoTiler(inputDir: string, outputDir: string, options:
       // -sbn was tested and removed -- it crashes with "Total Node Count 0"
       // on real GLB input (confirmed upstream bug, mago-3d-tiler issue #52).
       //
-      // -nl/-xl/-mg: the LOD-depth levers that actually control real tile subdivision,
-      // separate from -mx (the per-tile triangle budget). Real testing showed -mx alone,
-      // across its full practical range (30,000 down to 500), had no effect on tile count
-      // or size for an 8,511-node input -- one 46MB tile every time -- so -mx alone isn't
-      // sufficient; mago-3d-tiler also needs to be told how many LOD levels to actually
-      // generate.
-      //   -nl (--minLod): minimum level of detail to generate.
-      //   -xl (--maxLod): maximum level of detail to generate -- more levels means more
-      //     opportunities to subdivide.
-      //   -mg (--maxGeometricError): NOT "merge distance in meters" despite how it may read --
-      //     confirmed directly against --help ("[Tileset] Maximum geometric error"). It's a
-      //     3D Tiles screen-space-error-style tolerance: the largest geometric error a tile
-      //     is allowed to have before a finer LOD is required, so a smaller value forces more
-      //     aggressive subdivision to stay under it.
-      '-nl',
-      '3',
-      '-xl',
-      '8',
-      '-mg',
-      '100',
+      // -nl/-xl/-mg (--minLod/--maxLod/--maxGeometricError, the LOD-depth levers) were added
+      // in an earlier revision of this file, on the belief -- based on real testing at the
+      // time -- that they were necessary for real tile subdivision, since -mx alone had no
+      // effect across its full practical range on an 8,511-node MERGED-GLB input (one 46MB
+      // tile every time, regardless of -mx). REMOVED here, corrected by Phase 5R Task 0/2:
+      // that observation was real, but the conclusion was wrong. mago-3d-tiler fundamentally
+      // does not spatially subdivide a single merged-GLB input at all, no matter what flags
+      // are passed -- confirmed directly (docs/phase5r/task0-findings.md): merged-mode input
+      // produces either a fixed, fake 4-tile templated LOD chain (regardless of real object
+      // count or size) or, above a density threshold, crashes outright with zero output. What
+      // -nl/-xl/-mg actually appeared to change was which flavor of that non-representative
+      // merged-mode behavior showed up, not real subdivision. A DIRECTORY of separate
+      // per-object GLBs (this worker's own splitter.ts, Task 2) is what mago actually
+      // subdivides for real, and Task 0's directory-mode validation run -- 142 real,
+      // spatially-subdivided, budget-compliant tiles, max 4.1MB, zero missing references --
+      // used -tv 1.1 -mx <N> ALONE, with no -nl/-xl/-mg, and needed nothing else. Re-confirmed
+      // directly against production worker code (not a standalone spike script) during Task 2:
+      // see the Task 2 PR description for the with-vs-without A/B comparison run.
     ]);
     return { exitCode: 0, stdout, stderr };
   } catch (err) {

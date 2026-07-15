@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { runMagoTiler, type MagoTilerResult } from './magoTiler.js';
+import { splitObjects } from './splitter.js';
 import { repairTileset, validateTileset } from './tilesetIntegrity.js';
 
 const MAX_TILE_SIZE_BYTES = 8 * 1024 * 1024;
@@ -32,7 +33,13 @@ function integrityFailure(reason: string, runResult: MagoTilerResult): Error {
 
 export interface TileGlbResult {
   tilesetPath: string;
+  metadataPath: string;
   warnings: string[];
+}
+
+export interface TileGlbOptions {
+  /** See config.ts's Config.splitterTriangleFloor doc comment. */
+  triangleFloor: number;
 }
 
 /**
@@ -40,6 +47,11 @@ export interface TileGlbResult {
  * fbx/index.ts) into an OGC 3D Tiles tileset via mago-3d-tiler, enforcing the ≤8MB-per-tile
  * budget by re-running with a smaller -mx (max triangles per tile node) whenever any
  * produced tile exceeds it.
+ *
+ * Task 2 (per-object pipeline reshape): the merged GLB is first exploded into one file per
+ * object by splitter.ts (see its own doc comment for the identity/fragment-merge rules) --
+ * mago-3d-tiler genuinely spatially subdivides a directory of separate per-object GLBs, but
+ * never a single merged one, confirmed by Task 0 (docs/phase5r/task0-findings.md).
  *
  * Integrity gate (Task 1 of the phase5r plan): every attempt is validated before its tile
  * sizes are even inspected, per validateTileset()/repairTileset() in ./tilesetIntegrity.ts --
@@ -50,6 +62,18 @@ export interface TileGlbResult {
  * every source file's convert() has already succeeded -- so a thrown error here means
  * publishRevision() is never reached at all for this job (CLAUDE.md invariant #6: no partial-
  * publish state is ever visible to readers).
+ *
+ * Task 2 policy addition on top of Task 1's (otherwise unchanged) gate mechanics: since every
+ * object is now individually provided to mago as its own input file, mago dropping any of
+ * them (tileset.json referencing missing/empty content, case (b)) is no longer an inherent,
+ * expected consequence of a known merged-mode quirk -- it indicates mago genuinely failed to
+ * tile something it was given, which is worth surfacing as a job failure, not silently
+ * papering over with a warning the way Task 1 originally treated case (b) for merged-mode
+ * input. repairTileset() itself is NOT changed (still attempted, still re-validated -- Task
+ * 1's gate runs unchanged, per this task's own spec) -- this caller instead escalates a
+ * *successful* repair outcome into a thrown error once the retry loop would otherwise accept
+ * it, so the underlying repair mechanism stays available for any future caller that still
+ * wants it.
  *
  * Draco compression: mago-3d-tiler does not apply it natively -- confirmed against its own
  * README/MANUAL.md (no -draco flag, no mention of Draco anywhere in its CLI reference).
@@ -63,15 +87,13 @@ export interface TileGlbResult {
  * plant-model tiles at reasonable LOD depths fit the budget on triangle count alone for any
  * source this worker has actually seen.
  */
-export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileGlbResult> {
+export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Map<string, string>, options: TileGlbOptions): Promise<TileGlbResult> {
   const stagingInputDir = path.join(outDir, 'tiling-input');
   const tilesOutDir = path.join(outDir, 'tiles');
 
-  await fsp.mkdir(stagingInputDir, { recursive: true });
-  const stagedGlbPath = path.join(stagingInputDir, path.basename(rawGlbPath));
-  await fsp.rename(rawGlbPath, stagedGlbPath);
+  const splitResult = await splitObjects(rawGlbPath, stagingInputDir, linkageMap, { triangleFloor: options.triangleFloor });
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...splitResult.warnings];
   let maxTriangleCount = INITIAL_MAX_TRIANGLE_COUNT;
 
   for (;;) {
@@ -112,7 +134,10 @@ export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileG
 
     // Case (b): tileset.json exists but references missing/empty tile content -- repair by
     // regenerating from whatever content actually survived, then re-validate before trusting
-    // the result.
+    // the result. repairTileset()/validateTileset() themselves are unchanged from Task 1; see
+    // this function's own doc comment for why a repair that succeeds still fails the JOB for
+    // split-mode input (checked below, once we know this attempt would otherwise be accepted).
+    let repairedThisAttempt: { missingCount: number; missingList: string[] } | undefined;
     if (!validation.ok) {
       const beforeRepair = validation;
       await repairTileset(tilesOutDir);
@@ -120,6 +145,7 @@ export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileG
       if (validation.loadStatus !== 'ok' || !validation.ok) {
         throw integrityFailure(`tileset.json repair at ${tilesOutDir} did not converge -- still invalid after regenerating from surviving content`, runResult);
       }
+      repairedThisAttempt = { missingCount: beforeRepair.missing.length, missingList: beforeRepair.missing };
       warnings.push(
         `repaired tileset.json: dropped ${beforeRepair.missing.length} missing/empty content reference(s) (${beforeRepair.missing.join(', ')}), kept ${validation.tileCount} usable tile(s)`,
       );
@@ -133,9 +159,29 @@ export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileG
     // Only now is it meaningful to check individual tile sizes against the 8MB budget.
     const oversized = validation.tiles.filter((t) => t.sizeBytes > MAX_TILE_SIZE_BYTES);
 
-    if (oversized.length === 0) break;
+    if (oversized.length === 0) {
+      if (repairedThisAttempt) {
+        throw new Error(
+          `split-mode tiling required a tileset repair -- a FAILED run for split-mode input, not a warning: each object was provided to mago-3d-tiler individually, so mago dropping ${repairedThisAttempt.missingCount} of them (${repairedThisAttempt.missingList.join(', ')}) indicates a real anomaly worth investigating, not an expected consequence of a known merged-mode quirk. Healthy split-mode output must yield tileCount > 0 with ZERO repairs.`,
+        );
+      }
+      break;
+    }
 
     if (maxTriangleCount <= MIN_MAX_TRIANGLE_COUNT) {
+      if (repairedThisAttempt) {
+        throw new Error(
+          `split-mode tiling required a tileset repair AND still exceeds the 8MB-per-tile budget at the minimum LOD depth -- a FAILED run, not a warning (see the clean-success path's identical policy above).`,
+        );
+      }
+      // Policy (confirmed against the real-file run, docs/phase5r/task2-findings.md §7: 4
+      // tiles up to 29.4MB at this exact floor): oversized-at-minimum-LOD with NO repair
+      // needed PUBLISHES, with a structured warning, rather than failing the job. The 8MB
+      // figure is a streaming/runtime-performance guard (how much a client fetches per tile),
+      // not a publishability gate -- unlike case (b)/(c) above, an oversized tile is still
+      // complete, correct geometry a client CAN load, just slower than ideal. Missing/
+      // zero-content tiles (case (b)/(c)) stay hard failures regardless of size, since those
+      // mean data is actually gone, not merely large.
       const summary = oversized.map((o) => `${o.uri} (${(o.sizeBytes / (1024 * 1024)).toFixed(1)}MB)`).join(', ');
       warnings.push(
         `${oversized.length} tile(s) exceed the 8MB-per-tile budget even at the minimum LOD depth (maxTriangleCount=${maxTriangleCount}): ${summary}`,
@@ -146,7 +192,13 @@ export async function tileGlb(rawGlbPath: string, outDir: string): Promise<TileG
     maxTriangleCount = Math.max(MIN_MAX_TRIANGLE_COUNT, Math.round(maxTriangleCount * TRIANGLE_COUNT_BACKOFF_FACTOR));
   }
 
+  // metadata.json (Task 2) is a persistent sidecar artifact, same lifetime as tileset.json --
+  // relocate it out of stagingInputDir (about to be deleted) alongside linkage-map.json's own
+  // convention (pipeline.ts writes that one directly at outDir/linkage-map.json).
+  const metadataPath = path.join(outDir, 'metadata.json');
+  await fsp.rename(splitResult.metadataPath, metadataPath);
+
   await fsp.rm(stagingInputDir, { recursive: true, force: true });
 
-  return { tilesetPath: path.join(tilesOutDir, 'tileset.json'), warnings };
+  return { tilesetPath: path.join(tilesOutDir, 'tileset.json'), metadataPath, warnings };
 }
