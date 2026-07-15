@@ -89,6 +89,9 @@ async function listOnDiskContentFiles(dir: string, baseDir: string = dir): Promi
 
 function collectContentUris(node: TileNode | undefined, out: Set<string>): void {
   if (!node) return;
+  // Does not distinguish/recurse into external tilesets (a content.uri pointing at another
+  // .json rather than a renderable model) -- mago-3d-tiler always emits one self-contained
+  // tileset.json referencing only .glb/.b3dm content, confirmed by Task 0 (PR #10).
   const single = node.content?.uri ?? node.content?.url;
   if (single) out.add(single);
   for (const c of node.contents ?? []) {
