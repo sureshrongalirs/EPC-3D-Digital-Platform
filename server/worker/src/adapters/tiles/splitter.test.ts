@@ -569,6 +569,70 @@ describe('splitObjects (Task 2 per-object pipeline reshape)', () => {
     }
   });
 
+  it('PR #13 fix-up-2 verification gap: the three-deep fragment chain produces IDENTICAL output (deep-equal metadata records, byte-identical files) across two independent splitObjects() runs against the same input', async () => {
+    // resolveTarget()'s own doc comment claims "re-running against identical input always
+    // produces identical groupings" -- this test is the first to actually verify that claim
+    // for a chain, not just assert a single run's shape is correct. Runs splitObjects() TWICE
+    // against the SAME source GLB, into two SEPARATE output directories, then compares both
+    // the returned metadata records and the actual on-disk bytes.
+    const outDirA = await makeTempDir();
+    const outDirB = await makeTempDir();
+    const genDir = await makeTempDir();
+    try {
+      const doc = new Document();
+      const buffer = doc.createBuffer();
+      const material = doc.createMaterial('Mat').setBaseColorFactor([0.7, 0.7, 0.7, 1]);
+      const scene = doc.createScene('Scene');
+      doc.getRoot().setDefaultScene(scene);
+
+      function makeMeshNode(name: string, triangleMultiplier: number): { node: ReturnType<Document['createNode']>; triangleCount: number } {
+        const positions: number[] = [];
+        const indices: number[] = [];
+        for (let i = 0; i < triangleMultiplier; i++) {
+          const base = positions.length / 3;
+          positions.push(0, 0, i, 1, 0, i, 0, 1, i);
+          indices.push(base, base + 1, base + 2);
+        }
+        const pos = doc.createAccessor(`${name}-pos`).setType('VEC3').setArray(new Float32Array(positions)).setBuffer(buffer);
+        const idx = doc.createAccessor(`${name}-idx`).setType('SCALAR').setArray(new Uint16Array(indices)).setBuffer(buffer);
+        const prim = doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(material);
+        const mesh = doc.createMesh(name).addPrimitive(prim);
+        return { node: doc.createNode(name).setMesh(mesh), triangleCount: triangleMultiplier };
+      }
+
+      const { node: grandparent } = makeMeshNode('FragGrandparent', 1);
+      const { node: parent } = makeMeshNode('FragParent', 2);
+      const { node: child } = makeMeshNode('FragChild', 3);
+      grandparent.addChild(parent);
+      parent.addChild(child);
+      scene.addChild(grandparent);
+
+      const glbPath = path.join(genDir, 'model.glb');
+      await new NodeIO().write(glbPath, doc);
+
+      const resultA = await splitObjects(glbPath, outDirA, new Map(), { triangleFloor: 50 });
+      const resultB = await splitObjects(glbPath, outDirB, new Map(), { triangleFloor: 50 });
+
+      expect(resultA.objects).toHaveLength(1);
+      expect(resultB.objects).toEqual(resultA.objects); // deep-equal metadata records
+      expect(resultB.warnings).toEqual(resultA.warnings);
+
+      const filesA = await listGlbFiles(outDirA);
+      const filesB = await listGlbFiles(outDirB);
+      expect(filesB).toEqual(filesA); // identical filenames
+
+      for (const file of filesA) {
+        const bytesA = await fsp.readFile(path.join(outDirA, file));
+        const bytesB = await fsp.readFile(path.join(outDirB, file));
+        expect(bytesB.equals(bytesA)).toBe(true); // byte-identical output GLB
+      }
+    } finally {
+      await fsp.rm(genDir, { recursive: true, force: true });
+      await fsp.rm(outDirA, { recursive: true, force: true });
+      await fsp.rm(outDirB, { recursive: true, force: true });
+    }
+  });
+
   it('fragment merge target that is a meshless pure-group node: separate synthetic group file, not merged into any sibling normal object', async () => {
     const { generateHierarchyFixture } = await loadGenerator();
     const genDir = await makeTempDir();
