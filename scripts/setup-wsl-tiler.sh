@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# One-time dev setup for running server/worker's OGC 3D Tiles path (mago-3d-tiler, CLAUDE.md
-# invariant #4) directly on the host, inside WSL Ubuntu, instead of inside the worker's Docker
-# image. Java is NOT needed in production: server/worker/Dockerfile already bakes a JRE and
-# the mago-3d-tiler jar into the worker's own image at build time (see its comments) -- this
-# script exists purely so a developer can run `pnpm exec tsx watch src/index.ts` on the bare
-# WSL host (e.g. to test the tiling path without rebuilding the Docker image on every change)
-# and still have `java`/mago-3d-tiler available on PATH.
+# One-time dev setup for running server/worker directly on the host, inside WSL Ubuntu,
+# instead of inside the worker's Docker image. Despite the filename (kept as-is to avoid
+# rename churn across CLAUDE.md / docs/phase5r/task0-findings.md's own historical citation of
+# it), this now provisions the FULL worker toolchain, not just the OGC 3D Tiles path: none of
+# it is needed in production, since server/worker/Dockerfile already bakes all of it into the
+# worker's own image at build time (see its comments) -- this script exists purely so a
+# developer can run `pnpm exec tsx watch src/index.ts` on the bare WSL host (e.g. to test
+# without rebuilding the Docker image on every change) and still have everything the worker
+# shells out to available on PATH. Discovered as a real, previously-undocumented gap during
+# Phase 5R Task 2 PR #13's manual verification: a fresh machine could not run FBX conversion
+# at all following the README's own documented steps, since this script never installed
+# assimp (every FBX conversion needs it, not just large-model tiling) -- see
+# docs/phase5r/task2-findings.md.
 #
 # Installs, in order:
 #   1. A JDK 21+ (tries `openjdk-21-jdk` from Ubuntu's own apt repos first; falls back to
 #      Eclipse Temurin 21 via Adoptium's own apt repo if that package isn't available on this
 #      Ubuntu release)
 #   2. The mago-3d-tiler jar, to /opt/mago-3d-tiler.jar
+#   3. assimp-utils (the `assimp` CLI -- FBX->GLB geometry conversion, needed for EVERY FBX
+#      job, not just large ones routed to tiles) and mdbtools (`mdb-export`/`mdb-tables` --
+#      .mdb2 ingestion) via apt-get, matching server/worker/Dockerfile's own package list
+#      exactly so dev-WSL and the production image install the same toolchain.
 #
 # Safe to run more than once -- each step is skipped if already done.
 #
@@ -99,13 +109,34 @@ else
   sudo curl -fsSL -o "$MAGO_JAR_PATH" "$JAR_URL"
 fi
 
-# --- Step 5: verify. ------------------------------------------------------------------------
+# --- Step 5: assimp-utils + mdbtools, if either binary isn't already on PATH. ---------------
+# Independent of Step 2/3's Java check above: apt-get update+install only ran there if Java
+# itself was missing, so a machine with Java already installed (e.g. from a JDK unrelated to
+# this script) would otherwise never reach an apt-get call at all and would silently skip
+# assimp/mdbtools too -- confirmed as the exact real gap this step closes (PR #13 manual
+# verification: a fresh WSL environment had java+mago from an earlier run of this script, but
+# no assimp, and every FBX job failed with "assimp is not installed in this environment").
+if command -v assimp >/dev/null 2>&1 && command -v mdb-export >/dev/null 2>&1; then
+  echo "assimp and mdbtools already installed, skipping."
+else
+  echo "Installing assimp-utils and mdbtools..."
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends assimp-utils mdbtools
+fi
+
+# --- Step 6: verify. ------------------------------------------------------------------------
 echo
 echo "--- java -version ---"
 java -version
 echo
 echo "--- java -jar $MAGO_JAR_PATH --help (first 5 lines) ---"
 java -jar "$MAGO_JAR_PATH" --help 2>&1 | head -5
+echo
+echo "--- assimp version ---"
+assimp version
+echo
+echo "--- mdb-tables ---"
+command -v mdb-tables
 echo
 echo "Setup complete. Start the worker with:"
 echo "MAGO_TILER_JAR=$MAGO_JAR_PATH DATA_DIR=... DATABASE_URL=... pnpm exec tsx watch src/index.ts"
