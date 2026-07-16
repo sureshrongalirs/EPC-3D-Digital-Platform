@@ -339,14 +339,14 @@ size-reduction strategy) is out of Task 2's own scope (per-object pipeline resha
 post-processing), and is now a confirmed-necessary follow-up rather than a theoretical one; left
 for the user to scope as an explicit task rather than folded in silently.
 
-## 8. Two further follow-ups, discovered during manual verification (real-upload triage)
+## 8. Three further follow-ups, discovered during manual verification (real-upload triage)
 
-Neither is a Task 2 splitter defect — both are worker process-lifecycle gaps, surfaced by a
-real failure during manual verification of a real upload (model
+None are Task 2 splitter defects — all three are worker process-lifecycle/environment gaps,
+surfaced by a real failure during manual verification of a real upload (model
 `f3953097-2223-40f1-b532-421f5f0976c2`, `testdata/local/2 1.fbx`). Full evidence chain
 (timestamps, DB state, on-disk artifact comparison) is in that triage's own transcript; summarized
-here for the record, since both are real, reproducible, out-of-Task-2-scope items rather than
-one-off session mistakes.
+here for the record, since all three are real, reproducible, out-of-Task-2-scope items rather
+than one-off session mistakes.
 
 **(a) Stopping the worker process does not terminate the `java`/`mago-3d-tiler` child process it
 spawned.** `runMagoTiler()` (`magoTiler.ts`) invokes `java -jar mago-3d-tiler.jar ...` via
@@ -380,9 +380,46 @@ deleted at the *start* of a job attempt, not assumed clean, specifically for the
 case this task's own retry-loop `fsp.rm` calls don't cover (those only clear between *retry
 iterations within one live attempt*, not between a killed attempt and its later reclaim).
 
-Both are real, evidenced gaps in the worker's process/retry model, not the per-object splitter
-this task actually shipped — flagged here rather than silently absorbed into a "was probably
-fine" assumption, and left for the user to scope as explicit follow-up work.
+**(c) The `DeletingPathVisitor` crash itself (referenced in (a) above) has a confirmed root
+cause, and it's environmental, not the orphan-process race originally hypothesized.** Both
+observed crashes on this triage's failed job carried the *identical* stack trace
+(`org.apache.commons.io.file.DeletingPathVisitor.postVisitDirectory` → `PathUtils.deleteDirectory`
+→ `FileUtils.forceDelete`, thrown during mago's own post-processing temp-directory cleanup) —
+too consistent to be a random race. The confirmed (pending one final re-verification upload)
+explanation: `DATA_DIR` was pointed at `/mnt/d/...`, a 9p-mounted view of the Windows-side
+filesystem, not WSL's own native ext4. Every *successful* real-mago run this whole phase (Task 0
+through this task's own fix-up rounds) ran against a WSL-native ext4 path
+(`~/verify/...`) — this triage's failed job is the first and only real-mago run against a
+`/mnt/*` path, and it crashed the same way twice. In light of this, item (a)'s "orphaned java
+process survives worker shutdown" framing should be read narrowly: the process-lifecycle
+concern itself (Node stopping without confirming its child `java` process also exits) is still
+real and independently worth fixing, but the specific "file written 11+ minutes after job
+failed" symptom is now better explained by 9p-induced slowness/failure in mago's own cleanup
+step than by a literal surviving orphan process — both readings are consistent with the same
+raw timestamps, and this doc isn't overstating which one actually happened.
+
+**Environment fix (applied, not merely proposed):** `DATA_DIR`/`DATABASE_URL` now must live on
+WSL's own native ext4 (e.g. `~/plantscope-data`), never under `/mnt/<drive>` — see
+`README.md`'s "Windows dev machines" subsection, updated with this requirement and the exact
+commands. This is a dev-environment-only concern: production runs inside the worker's own
+Docker container, whose filesystem is never a 9p mount, so this specific failure mode has no
+production exposure as deployed today.
+
+**Candidate code-level hardening (follow-up list, not applied here):** pass mago's own `-t`/
+`--temp <arg>` flag (confirmed present in its `--help` output, default `{OUTPUT}/temp`) pointed
+at a guaranteed-local temp path, rather than relying on `{OUTPUT}` itself being on a
+filesystem that behaves well under mago's own cleanup routine. The dev-environment fix above is
+sufficient for this repo's own WSL dev workflow, and production's container filesystem sidesteps
+the issue entirely — but explicitly pinning `-t` would make the worker robust to *any*
+slow/network-mounted output volume in general (an NFS-backed `/data` mount in some future
+deployment topology, for instance), not just this specific dev-machine shape. Left unimplemented
+here since dev/prod are both already covered without it; recorded as a real, scoped
+follow-up rather than silently assumed unnecessary.
+
+All three are real, evidenced gaps surfaced by manual verification of this task's own shipped
+code, not defects in the per-object splitter itself — flagged here rather than silently absorbed
+into a "was probably fine" assumption, and left for the user to scope as explicit follow-up
+work.
 
 ## Scope check
 
