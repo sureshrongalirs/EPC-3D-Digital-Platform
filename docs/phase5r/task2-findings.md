@@ -339,6 +339,51 @@ size-reduction strategy) is out of Task 2's own scope (per-object pipeline resha
 post-processing), and is now a confirmed-necessary follow-up rather than a theoretical one; left
 for the user to scope as an explicit task rather than folded in silently.
 
+## 8. Two further follow-ups, discovered during manual verification (real-upload triage)
+
+Neither is a Task 2 splitter defect — both are worker process-lifecycle gaps, surfaced by a
+real failure during manual verification of a real upload (model
+`f3953097-2223-40f1-b532-421f5f0976c2`, `testdata/local/2 1.fbx`). Full evidence chain
+(timestamps, DB state, on-disk artifact comparison) is in that triage's own transcript; summarized
+here for the record, since both are real, reproducible, out-of-Task-2-scope items rather than
+one-off session mistakes.
+
+**(a) Stopping the worker process does not terminate the `java`/`mago-3d-tiler` child process it
+spawned.** `runMagoTiler()` (`magoTiler.ts`) invokes `java -jar mago-3d-tiler.jar ...` via
+`execFile`, a direct child process. When the worker's own Node process was stopped mid-job (in
+this case, deliberately, to get a clean test run — but the same failure mode applies to *any*
+worker restart or OOM-kill in production, which invariant #7's single-docker-compose-stack
+deployment does not otherwise protect against), the underlying java process was not observed to
+terminate with it. Evidence: the job's own `tileset.json` and all 210 tile `.glb` files exist on
+disk with mtimes **11+ minutes after** the worker had already logged `"job failed"` and moved on
+— something kept writing to that output directory well after the Node process that spawned it
+had given up and exited. A production worker restart or OOM-kill would reproduce this exact race:
+an orphaned mago process racing a subsequently-reclaimed retry of the same job, both writing to
+the same output directory. Not fixed here — would need either process-group-aware child-process
+management (spawn `java` in a way that lets Node reliably kill the whole tree, e.g. `detached:
+false` plus explicit `SIGKILL` to the child on worker shutdown/stall) or a `--temp`-style
+mago flag to give each attempt an isolated output path so a stale writer can't collide with a
+fresh one.
+
+**(b) A reclaimed job re-runs into a staging directory that still holds the interrupted attempt's
+leftovers.** `queue.ts`'s `reclaimStalledJobs` correctly resets an orphaned `processing` row back
+to `queued` (crash-safety working as designed), but `processJob()`/`tileGlb()`/`splitObjects()`
+have no "clean start" step for a *reclaimed* job specifically — `splitObjects()`'s own
+`fsp.mkdir(outDir, { recursive: true })` is a no-op if the directory already has content from a
+prior, interrupted attempt at the same revision, so a reclaimed job's fresh `splitObjects()` call
+writes into (not over) whatever the interrupted attempt left in `tiling-input`. Evidence: on the
+same failed job, `model.raw.glb`'s mtime (18:53:43 UTC, the reclaimed attempt's fresh assimp
+export) is *later* than `tiling-input`'s own directory mtime (18:23:48 UTC, the original
+attempt's split output) — the reverse of what one clean, sequential run would ever produce. Not
+fixed here — staging directories (`tiling-input`, and `tiles/`'s own working state) should be
+deleted at the *start* of a job attempt, not assumed clean, specifically for the reclaimed-job
+case this task's own retry-loop `fsp.rm` calls don't cover (those only clear between *retry
+iterations within one live attempt*, not between a killed attempt and its later reclaim).
+
+Both are real, evidenced gaps in the worker's process/retry model, not the per-object splitter
+this task actually shipped — flagged here rather than silently absorbed into a "was probably
+fine" assumption, and left for the user to scope as explicit follow-up work.
+
 ## Scope check
 
 This doc accompanies the full Task 2 splitter implementation (`splitter.ts`, `worldTransform.ts`,
