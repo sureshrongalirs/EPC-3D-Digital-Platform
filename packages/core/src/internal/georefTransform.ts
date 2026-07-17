@@ -25,3 +25,34 @@ export function georefRotationRadiansY(rotationDeg: number): number {
 export function applyGeorefRotation(object: THREE.Object3D, rotationDeg: number): void {
   object.rotation.y = georefRotationRadiansY(rotationDeg);
 }
+
+/**
+ * Guards `applyGeorefRotation` against a reload race: `Viewer.loadModel()`/`loadTilesModel()`
+ * fetch the resolved georef rotation over the network (an unavoidable await), and neither
+ * method has any concurrency guard against a second `loadModel()` call superseding the first
+ * one's model group while that fetch is still in flight (PR #14 verification's adversarial
+ * finding). Without this guard, a stale continuation reading `this.modelGroup` again *after*
+ * its own await would either throw (a concurrent `unloadModel()` already nulled it) or, worse,
+ * silently rotate the WRONG (current, superseding) model.
+ *
+ * `expectedGroup` is captured by the caller *before* the await; `getCurrentGroup` is called
+ * *after* `fetchRotationDeg` resolves, reading whatever is live at that moment. If they no
+ * longer match, this is a silent no-op -- never a throw, never a rotation applied to state a
+ * newer load already owns. This is a narrow symptom guard, not the full fix: it stops the
+ * one observable bad effect (a wrong/crashing rotation), but the rest of the stale
+ * continuation's work (`fitToModel()`, `modelLoaded` events, etc.) is unguarded, and a
+ * possibly-orphaned tiles renderer isn't cleaned up either -- see the follow-up list for the
+ * real fix (a load-generation counter invalidating every stale continuation at once, which a
+ * future multi-model ModelManager would need anyway and would resolve this class of bug
+ * wholesale, not just this one symptom).
+ */
+export async function applyGeorefRotationIfStillCurrent(
+  expectedGroup: THREE.Object3D,
+  getCurrentGroup: () => THREE.Object3D | null,
+  fetchRotationDeg: () => Promise<number>,
+): Promise<void> {
+  const rotationDeg = await fetchRotationDeg();
+  if (getCurrentGroup() === expectedGroup) {
+    applyGeorefRotation(expectedGroup, rotationDeg);
+  }
+}

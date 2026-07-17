@@ -59,6 +59,30 @@ async function makeRawGlb(dir: string): Promise<string> {
   return rawGlbPath;
 }
 
+/** A valid, parseable GLB (repairTileset() reads real POSITION data via gltf-transform's
+ * getBounds() -- see tilesetIntegrity.ts) whose on-disk size exceeds the 8MB tile budget, via
+ * many repeated (degenerate is fine -- bounding-box math doesn't need unique geometry)
+ * triangles rather than padding raw bytes onto an otherwise-valid file. */
+async function writeOversizedTestGlb(glbPath: string): Promise<void> {
+  const doc = new Document();
+  const buffer = doc.createBuffer();
+  const triangleCount = 250_000; // 250k * 3 verts * 3 floats * 4 bytes ~= 9MB of POSITION data alone
+  const positions = new Float32Array(triangleCount * 9);
+  const indices = new Uint32Array(triangleCount * 3);
+  for (let t = 0; t < triangleCount; t++) {
+    const base = t * 9;
+    positions.set([0, 0, 0, 1, 0, 0, 0, 1, 0], base);
+    indices.set([t * 3, t * 3 + 1, t * 3 + 2], t * 3);
+  }
+  const positionAccessor = doc.createAccessor('positions').setType('VEC3').setArray(positions).setBuffer(buffer);
+  const indexAccessor = doc.createAccessor('indices').setType('SCALAR').setArray(indices).setBuffer(buffer);
+  const primitive = doc.createPrimitive().setAttribute('POSITION', positionAccessor).setIndices(indexAccessor);
+  const mesh = doc.createMesh('BigMesh').addPrimitive(primitive);
+  const node = doc.createNode('BigMesh').setMesh(mesh);
+  doc.createScene('Scene').addChild(node);
+  await new NodeIO().write(glbPath, doc);
+}
+
 const NO_LINKAGE_MAP = new Map<string, string>();
 const DEFAULT_SPLIT_OPTIONS = { triangleFloor: 50, blobWarnRatio: 0.5, inputSizeBytes: 1_000_000 };
 
@@ -289,6 +313,9 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
       // No repair warning -- this tileset was never broken.
       expect(result.warnings.some((w) => w.includes('repaired tileset.json'))).toBe(false);
       expect(mockedRepairTileset).not.toHaveBeenCalled();
+      // PR #14 verification fix-up: repairFired at the summary level, healthy-path half of
+      // the true/false pair (the repair-fired case is its own test below).
+      expect(result.summary.repairFired).toBe(false);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
@@ -356,6 +383,61 @@ describe('tileGlb integrity gate wiring (case (c): hard job failure, exit code +
       // This message comes from index.ts's own post-repair check, not repairTileset -- the
       // opposite half of the previous test's contrast.
       expect(err.message).toContain('did not converge');
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // PR #14 verification fix-up (verdict FAIL: repairFired's own computation was untested at
+  // the tileGlb() level -- only a hardcoded mock value in fbx/index.test.ts existed). Every
+  // OTHER repair-triggering test in this file escalates straight to a thrown error (Task 2's
+  // split-mode policy: a repair on the attempt that's about to be ACCEPTED is a hard failure),
+  // so none of them ever reach the `return {..., summary}` success path at all. This test
+  // constructs the one case that does: attempt 1 (maxTriangleCount 5000, the initial value)
+  // needs a repair AND is still oversized afterward, so the loop backs off and retries rather
+  // than accepting or throwing (repairFiredEver latches true here, `repairedThisAttempt` itself
+  // is NOT carried to the next loop iteration); attempt 2 (maxTriangleCount 2500) is clean --
+  // no missing refs, not oversized -- so it's accepted without ever needing repair. The
+  // published result must still report repairFired: true, proving the flag reflects the whole
+  // job's history, not just the final accepted attempt.
+  it('repairFired reflects the WHOLE job: true even when only an earlier (non-final) attempt needed a repair', async () => {
+    const dir = await makeTempDir();
+    try {
+      const rawGlb = await makeRawGlb(dir);
+      const outDir = path.join(dir, 'out');
+
+      mockedRunMagoTiler.mockImplementation(async (_inputDir, outputDir, opts) => {
+        await fsp.mkdir(outputDir, { recursive: true });
+        if (opts.maxTriangleCount === 5000) {
+          // Attempt 1: references a missing tile (triggers repair) AND the surviving tile is
+          // oversized (>8MB) -- repair succeeds but the result still can't be accepted, so
+          // the loop must back off and retry rather than accept-with-repair or throw.
+          await writeOversizedTestGlb(path.join(outputDir, 'good.glb'));
+          await fsp.writeFile(
+            path.join(outputDir, 'tileset.json'),
+            JSON.stringify({
+              root: { children: [{ content: { uri: 'good.glb' } }, { content: { uri: 'missing.glb' } }] },
+            }),
+          );
+        } else {
+          // Attempt 2 (backed off to maxTriangleCount 2500): clean, small, no missing refs --
+          // accepted without any repair this time.
+          await writeTestGlb(path.join(outputDir, 'small.glb'));
+          await fsp.writeFile(path.join(outputDir, 'tileset.json'), JSON.stringify({ root: { content: { uri: 'small.glb' } } }));
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      });
+
+      const result = await tileGlb(rawGlb, outDir, NO_LINKAGE_MAP, DEFAULT_SPLIT_OPTIONS);
+
+      expect(mockedRepairTileset).toHaveBeenCalledTimes(1); // only attempt 1 ever needed it
+      expect(mockedRunMagoTiler.mock.calls.length).toBe(2); // attempt 1 (repaired, still oversized) -> attempt 2 (accepted)
+
+      const raw = await fsp.readFile(result.tilesetPath, 'utf-8');
+      const tileset = JSON.parse(raw) as { root: { content?: { uri: string } } };
+      expect(tileset.root.content?.uri).toBe('small.glb'); // the FINAL (attempt 2) tileset, not attempt 1's
+
+      expect(result.summary.repairFired).toBe(true);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }

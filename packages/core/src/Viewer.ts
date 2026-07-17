@@ -17,7 +17,7 @@ import { GLTFMeshFeaturesExtension, GLTFStructuralMetadataExtension } from '3d-t
 
 import { createPanelSlot, createToolbarSlot } from './internal/domSlots';
 import { EventBusImpl } from './internal/eventBus';
-import { applyGeorefRotation } from './internal/georefTransform';
+import { applyGeorefRotation, applyGeorefRotationIfStillCurrent } from './internal/georefTransform';
 import { createColorizeMaterial, createHighlightMaterial } from './internal/highlight';
 import { resolveObjectByTriangleIndex } from './internal/picking';
 import { PluginHost } from './internal/pluginHost';
@@ -336,9 +336,16 @@ export class Viewer {
     // already gates the tiles backend selection above. Before this task, this GLB path
     // applied no georef transform at all (see finding #4) -- this is what makes "same as the
     // GLB path" true for the tiles path's own positioning below, rather than aspirational.
+    //
+    // applyGeorefRotationIfStillCurrent (PR #14 verification's adversarial finding): the fetch
+    // below is an unguarded await -- a second loadModel() call racing in while it's in flight
+    // would already have replaced this.modelGroup by the time it resolves. loadedGroup is
+    // captured now, before the await, so the guard can detect that and silently skip applying
+    // a stale rotation rather than throwing (unloadModel() nulled this.modelGroup) or rotating
+    // the wrong, superseding model.
     if (modelPointerRecord) {
-      const rotationDeg = await this.fetchGeorefRotationDeg(id);
-      applyGeorefRotation(this.modelGroup, rotationDeg);
+      const loadedGroup = this.modelGroup;
+      await applyGeorefRotationIfStillCurrent(loadedGroup, () => this.modelGroup, () => this.fetchGeorefRotationDeg(id));
     }
 
     const registry = buildSceneRegistry(this.modelGroup);
@@ -444,12 +451,27 @@ export class Viewer {
 
     // Georef positioning (design-checkpoint sign-off item 2): never trust mago's own
     // boundingVolume.region (garbage -- task2-findings.md, binding) -- apply this platform's
-    // own resolved rotation instead, via the SAME shared helper the GLB path above uses, so
-    // the two backends can never disagree on sign convention. updateMatrixWorld(true) is
-    // forced here (rather than left to the next render frame) since fitToModel() below reads
-    // the world-space bounding sphere synchronously, before any frame has rendered.
-    applyGeorefRotation(asObject3D(tilesRenderer.group), rotationDeg);
-    asObject3D(tilesRenderer.group).updateMatrixWorld(true);
+    // own resolved rotation instead, via the SAME rotation math the GLB path above uses
+    // (applyGeorefRotation itself), so the two backends can never disagree on sign convention.
+    //
+    // Reload-race guard, mirroring the GLB branch's applyGeorefRotationIfStillCurrent above
+    // (PR #14 verification's adversarial finding): the awaits feeding rotationDeg are a window
+    // where a concurrent loadModel()/loadTilesModel() call could already have replaced
+    // this.tilesRenderer. tilesRenderer here is a local const, so re-reading it can't
+    // null-dereference the way the GLB path's `this.modelGroup` could -- but applying a
+    // rotation to a now-detached instance would still be wrong (and, left unremoved by
+    // unloadModel() since that only ever touches the CURRENT this.tilesRenderer, would leak
+    // a stale tileset in the scene). Inlined rather than routed through
+    // applyGeorefRotationIfStillCurrent since rotationDeg is already resolved (bundled into
+    // the Promise.all above, not a standalone fetch) -- the check itself is the same shape,
+    // just applied directly rather than wrapped around an await. Only the rotation/matrix
+    // update is guarded here, matching the GLB path's own narrow scope -- the rest of this
+    // function's post-await work (bbox, modelInfo, fitToModel, emit) is unguarded; see the
+    // follow-up list for the real fix.
+    if (this.tilesRenderer === tilesRenderer) {
+      applyGeorefRotation(asObject3D(tilesRenderer.group), rotationDeg);
+      asObject3D(tilesRenderer.group).updateMatrixWorld(true);
+    }
 
     // getBoundingSphere() returns the sphere in the group's LOCAL space (3d-tiles-renderer's
     // own API doc) -- must be transformed into world space to reflect the rotation just

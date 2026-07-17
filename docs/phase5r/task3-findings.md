@@ -95,3 +95,34 @@ lookup through `linkage-map.json` redundant for this purpose. `linkage-map.json`
 serving route are unchanged and left in place (still used for join-coverage computation in
 `pipeline.ts`, and potentially other consumers) — only `Viewer.ts`'s own tiled-pick code
 stopped calling it.
+
+## 5. Follow-ups (found during PR #14 verification, not fixed in this PR)
+
+**Barycoord: `computeHitBarycoord()` is redundant with three.js's own `hit.barycoord`.**
+`internal/tiles.ts`'s `computeHitBarycoord()` manually re-derives a raycast hit's barycentric
+coordinate via `mesh.worldToLocal()` + `THREE.Triangle.getBarycoord()`. Checking
+`@types/three@0.185.0`'s `Intersection` interface and the actual `three@0.185.1` runtime
+source (`src/objects/Mesh.js:450-488`) during PR review confirmed `Mesh.raycast()` already
+computes this internally and sets `intersection.barycoord` on every hit — the manual
+computation is functionally correct (same triangle, same formula) but unnecessary. Follow-up:
+drop `computeHitBarycoord()` and `resolveTiledPickMetadata()`'s call to it in favor of reading
+`hit.barycoord` directly off the raycast result (with a fallback/assertion for the case where
+it's ever absent, since the type is `Vector3 | null | undefined`).
+
+**Reload race: `loadModel()`/`loadTilesModel()` have no concurrency guard against a second
+`loadModel()` call superseding the first while it's mid-flight on an async fetch.** PR #14
+verification's adversarial pass found this concretely at the georef-rotation fetch (see
+`internal/georefTransform.ts`'s `applyGeorefRotationIfStillCurrent()`, added as a narrow
+symptom guard — it stops a stale continuation from throwing on a null `this.modelGroup` or
+misapplying a rotation to a newer, superseding model, but does nothing about the rest of a
+stale continuation's work: `fitToModel()`, the `modelLoaded` event, and — for the tiles path
+specifically — a superseded `TilesRenderer` instance never getting removed from the scene,
+since `unloadModel()` only ever touches the *current* `this.tilesRenderer`, leaking the stale
+one's geometry). The real fix is a load-generation counter: `loadModel()` increments a
+counter and captures its own generation number at entry; every continuation after an await
+checks its captured generation against the live one and bails out entirely (not just the
+rotation step) if it's stale. This resolves the whole class of bug at once, rather than one
+narrow symptom at a time. Note this is exactly the kind of state a future multi-model
+`ModelManager` (tracking several concurrently-loaded models, per the phase-opening caching
+design) would need to build anyway — that architecture should absorb this fix wholesale
+rather than this being patched incrementally per call site.
