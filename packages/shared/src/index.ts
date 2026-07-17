@@ -32,6 +32,34 @@ export interface PickResult {
   screen: ScreenPoint;
 }
 
+// ---------------------------------------------------------------------------
+// Task 2's metadata.json sidecar (OGC 3D Tiles per-object identity) -- fetched via
+// ModelDto.metadataUrl for a tiles-backed model. Mirrors server/worker's own
+// SplitObjectRecord/SplitResult shape (adapters/tiles/splitter.ts) but is defined here too
+// since that Node-only type isn't importable from browser code -- this is the wire shape a
+// browser client actually receives over HTTP.
+// ---------------------------------------------------------------------------
+
+export interface TileMergedSourceRef {
+  name: string;
+  linkageKey?: string;
+}
+
+export interface TileObjectMetadata {
+  file: string;
+  path: string[];
+  name: string;
+  kind: 'normal' | 'standaloneFragment' | 'mergedFragmentGroup';
+  linkageKey?: string;
+  triangleCount: number;
+  mergedFrom?: TileMergedSourceRef[];
+}
+
+export interface TileMetadataDocument {
+  version: number;
+  objects: TileObjectMetadata[];
+}
+
 export interface ModelInfo {
   id: string;
   name: string;

@@ -1,6 +1,8 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import type { TilesSummary } from '@plantscope/server-shared';
+
 import { runMagoTiler, type MagoTilerResult } from './magoTiler.js';
 import { splitObjects } from './splitter.js';
 import { repairTileset, validateTileset } from './tilesetIntegrity.js';
@@ -35,6 +37,9 @@ export interface TileGlbResult {
   tilesetPath: string;
   metadataPath: string;
   warnings: string[];
+  /** Task 3 deliverable 4 -- ops-visibility summary for this tiling job, surfaced through
+   * the catalog API rather than just worker logs. */
+  summary: TilesSummary;
 }
 
 export interface TileGlbOptions {
@@ -42,6 +47,9 @@ export interface TileGlbOptions {
   triangleFloor: number;
   /** See config.ts's Config.splitterBlobWarnRatio doc comment. */
   blobWarnRatio: number;
+  /** Source FBX's own size in bytes -- threaded through purely for the ops-visibility
+   * summary (TilesSummary.inputSizeBytes); this function itself never branches on it. */
+  inputSizeBytes: number;
 }
 
 /**
@@ -100,6 +108,9 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
 
   const warnings: string[] = [...splitResult.warnings];
   let maxTriangleCount = INITIAL_MAX_TRIANGLE_COUNT;
+  const startedAt = Date.now();
+  let repairFiredEver = false;
+  let finalValidation: Awaited<ReturnType<typeof validateTileset>> | undefined;
 
   for (;;) {
     await fsp.rm(tilesOutDir, { recursive: true, force: true });
@@ -151,6 +162,7 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
         throw integrityFailure(`tileset.json repair at ${tilesOutDir} did not converge -- still invalid after regenerating from surviving content`, runResult);
       }
       repairedThisAttempt = { missingCount: beforeRepair.missing.length, missingList: beforeRepair.missing };
+      repairFiredEver = true;
       warnings.push(
         `repaired tileset.json: dropped ${beforeRepair.missing.length} missing/empty content reference(s) (${beforeRepair.missing.join(', ')}), kept ${validation.tileCount} usable tile(s)`,
       );
@@ -170,6 +182,7 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
           `split-mode tiling required a tileset repair -- a FAILED run for split-mode input, not a warning: each object was provided to mago-3d-tiler individually, so mago dropping ${repairedThisAttempt.missingCount} of them (${repairedThisAttempt.missingList.join(', ')}) indicates a real anomaly worth investigating, not an expected consequence of a known merged-mode quirk. Healthy split-mode output must yield tileCount > 0 with ZERO repairs.`,
         );
       }
+      finalValidation = validation;
       break;
     }
 
@@ -191,6 +204,7 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
       warnings.push(
         `${oversized.length} tile(s) exceed the 8MB-per-tile budget even at the minimum LOD depth (maxTriangleCount=${maxTriangleCount}): ${summary}`,
       );
+      finalValidation = validation;
       break;
     }
 
@@ -205,5 +219,15 @@ export async function tileGlb(rawGlbPath: string, outDir: string, linkageMap: Ma
 
   await fsp.rm(stagingInputDir, { recursive: true, force: true });
 
-  return { tilesetPath: path.join(tilesOutDir, 'tileset.json'), metadataPath, warnings };
+  if (!finalValidation) throw new Error('tileGlb() invariant violated: loop exited without a finalValidation');
+  const tilesSummary: TilesSummary = {
+    inputSizeBytes: options.inputSizeBytes,
+    objectCount: splitResult.objects.length,
+    tileCount: finalValidation.tileCount,
+    maxTileBytes: finalValidation.maxTileBytes,
+    durationMs: Date.now() - startedAt,
+    repairFired: repairFiredEver,
+  };
+
+  return { tilesetPath: path.join(tilesOutDir, 'tileset.json'), metadataPath, warnings, summary: tilesSummary };
 }

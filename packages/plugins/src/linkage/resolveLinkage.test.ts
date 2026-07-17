@@ -1,4 +1,4 @@
-import type { ComponentRecord } from '@plantscope/shared';
+import type { ComponentRecord, TileObjectMetadata } from '@plantscope/shared';
 import { describe, expect, it } from 'vitest';
 
 import { resolveLinkage, type LinkageLookupOptions } from './resolveLinkage';
@@ -63,5 +63,62 @@ describe('resolveLinkage', () => {
   it('falls back to not-found when there is no key, no fuzzy match, and no geometry', async () => {
     const result = await resolveLinkage('Structural-Beam-9', options, fetchComponent, null);
     expect(result).toEqual({ tier: 'not-found' });
+  });
+});
+
+describe('resolveLinkage tier (c): metadata-record (Task 3 -- tiles-backed models with no components join)', () => {
+  const OBJECT_1880: TileObjectMetadata = {
+    file: 'Object_1880.glb',
+    path: ['Object_1880'],
+    name: 'Object_1880',
+    kind: 'standaloneFragment',
+    linkageKey: '5414 24846 22885 1064',
+    triangleCount: 24,
+  };
+  const MERGED_GROUP: TileObjectMetadata = {
+    file: 'Bracket_Group.glb',
+    path: ['Bracket_Group'],
+    name: 'Bracket_Group',
+    kind: 'mergedFragmentGroup',
+    triangleCount: 40,
+    mergedFrom: [
+      { name: 'Bolt_1', linkageKey: 'LINK-9001' },
+      { name: 'Bolt_2' },
+    ],
+  };
+
+  it('resolves via linkageKey when no components-table join exists for it', async () => {
+    const optionsWithMetadata: LinkageLookupOptions = {
+      ...options,
+      metadataByObjectId: { 'Object_1880.glb': OBJECT_1880, '5414 24846 22885 1064': OBJECT_1880 },
+    };
+    const result = await resolveLinkage('5414 24846 22885 1064', optionsWithMetadata, fetchComponent, null);
+    expect(result).toEqual({ tier: 'metadata-record', record: OBJECT_1880 });
+  });
+
+  it('resolves via file when there is no linkageKey (linkage coverage is optional)', async () => {
+    const optionsWithMetadata: LinkageLookupOptions = {
+      ...options,
+      metadataByObjectId: { 'Bracket_Group.glb': MERGED_GROUP },
+    };
+    const result = await resolveLinkage('Bracket_Group.glb', optionsWithMetadata, fetchComponent, null);
+    expect(result).toEqual({ tier: 'metadata-record', record: MERGED_GROUP });
+  });
+
+  it('is tried only after both components-table tiers miss (order: components match -> metadata record)', async () => {
+    const optionsWithBoth: LinkageLookupOptions = {
+      ...options, // 'Pump-1' -> LINK-1001 in linkageKeyByNodeName
+      metadataByObjectId: { 'Pump-1': OBJECT_1880 },
+    };
+    const result = await resolveLinkage('Pump-1', optionsWithBoth, fetchComponent, null);
+    expect(result).toEqual({ tier: 'full-join', linkageKey: 'LINK-1001', component: PUMP_1 });
+  });
+
+  it('falls through to geometry-only when metadataByObjectId has no entry for this nodeName', async () => {
+    const bbox = { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } };
+    const centroid = { x: 0.5, y: 0.5, z: 0.5 };
+    const optionsWithMetadata: LinkageLookupOptions = { ...options, metadataByObjectId: { 'Object_1880.glb': OBJECT_1880 } };
+    const result = await resolveLinkage('Unrelated-Object.glb', optionsWithMetadata, fetchComponent, { bbox, centroid });
+    expect(result.tier).toBe('geometry-only');
   });
 });

@@ -3,6 +3,8 @@ import type {
   ModelInfo,
   ObjectSummary,
   PickResult,
+  TileMetadataDocument,
+  TileObjectMetadata,
   TreeNode,
   Vector3Like,
 } from '@plantscope/shared';
@@ -11,17 +13,61 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { TilesRenderer } from '3d-tiles-renderer';
+import { GLTFMeshFeaturesExtension, GLTFStructuralMetadataExtension } from '3d-tiles-renderer/plugins';
 
 import { createPanelSlot, createToolbarSlot } from './internal/domSlots';
 import { EventBusImpl } from './internal/eventBus';
+import { applyGeorefRotation } from './internal/georefTransform';
 import { createColorizeMaterial, createHighlightMaterial } from './internal/highlight';
 import { resolveObjectByTriangleIndex } from './internal/picking';
 import { PluginHost } from './internal/pluginHost';
 import { RestClientImpl } from './internal/restClient';
 import { buildSceneRegistry, searchSceneObjects, type SceneObjectRecord } from './internal/sceneRegistry';
-import { computeTiledCentroids, resolveTiledObjectId, selectLoadBackend } from './internal/tiles';
+import {
+  computeTiledCentroids,
+  indexMetadataByFile,
+  resolveTiledPickMetadata,
+  selectLoadBackend,
+  tiledPickObjectId,
+} from './internal/tiles';
 import type { PickRange } from './internal/picking';
 import type { PlantScopePlugin, RestClient } from './plugin';
+
+// ---------------------------------------------------------------------------
+// 3d-tiles-renderer@0.4.28 type-declaration gaps (pre-existing, not introduced by Task 3 --
+// confirmed via `git stash` against this branch's own pre-Task-3 code, which already hit the
+// TilesGroup gap below at its own tilesRenderer.group call sites; never caught by CI because
+// this repo's workflow only triggers on `push: [main]` / `pull_request`, and recent phase5r
+// work landed on `dev` via direct fast-forward pushes, not merged PRs -- flagged in the
+// design-checkpoint report for visibility, fixed narrowly here since it blocks typechecking
+// this task's own new tilesRenderer.group.matrixWorld/updateMatrixWorld usage).
+//
+// Root cause (traced with `tsc --traceResolution`): three.js publishes no bundled .d.ts of
+// its own (its package.json has no "types" field) -- @types/three supplies it, and resolves
+// correctly for this package's OWN source files. But 3d-tiles-renderer's shipped .d.ts files
+// (e.g. TilesGroup.d.ts's `import { Group } from 'three'`) resolve 'three' relative to THEIR
+// OWN location inside node_modules, where TypeScript resolves the bare specifier straight to
+// three's untyped .js entry file rather than falling back to @types/three -- so TilesGroup
+// ends up seen as extending an almost-empty inferred type instead of the real THREE.Group.
+// Runtime behavior is entirely unaffected (tilesRenderer.group IS a real THREE.Group at
+// runtime) -- this cast documents that gap at its single choke point rather than sprinkling
+// unexplained `as unknown as` casts at every call site.
+function asObject3D(group: TilesRenderer['group']): THREE.Object3D {
+  return group as unknown as THREE.Object3D;
+}
+
+// Separate gap, same class: GLTFMeshFeaturesExtension/GLTFStructuralMetadataExtension's
+// shipped .d.ts declares no explicit constructor for either class (so TypeScript infers a
+// 0-arg default), but both take a GLTFParser at runtime -- confirmed against their own .js
+// source (`constructor(parser)` in each). Same kind of docs/types-vs-runtime gap this
+// codebase already found for 3d-tiles-renderer's `stats`/`cachedBytes` (see
+// TILES_CACHE_MAX_BYTES's doc comment below). Cast once, at the two construction sites,
+// rather than widening the class types themselves.
+type GLTFPluginCallback = Parameters<GLTFLoader['register']>[0];
+type GLTFPluginParser = Parameters<GLTFPluginCallback>[0];
+type GLTFPluginCtor = new (parser: GLTFPluginParser) => ReturnType<GLTFPluginCallback>;
+const MeshFeaturesExtensionCtor = GLTFMeshFeaturesExtension as unknown as GLTFPluginCtor;
+const StructuralMetadataExtensionCtor = GLTFStructuralMetadataExtension as unknown as GLTFPluginCtor;
 
 export interface ViewerOptions {
   apiUrl?: string;
@@ -83,11 +129,17 @@ interface ModelRecordResponse {
   status: 'queued' | 'processing' | 'ready' | 'failed';
   artifactUrl: string | null;
   artifactType: 'glb' | 'tiles' | null;
+  /** Task 3: Task 2's metadata.json sidecar (tiles-backed models only). */
+  metadataUrl: string | null;
   error: string | null;
 }
 
-/** GET /api/models/{id}/linkage-map's response shape: node/mesh name -> Linkage key. */
-type LinkageMapResponse = Record<string, string>;
+/** Minimal shape of GET /api/models/{id}/georef actually needed here -- a 404 (no georef
+ * saved for this model) is caught and treated as "no rotation to apply", same as
+ * MapGeorefPlugin's own fetch of this same endpoint. */
+interface GeorefResponse {
+  rotationDeg: number;
+}
 
 /** One entry of GET /api/components?model={id}&fields=bbox's response. */
 interface ComponentBboxResponse {
@@ -156,8 +208,14 @@ export class Viewer {
   private tilesRenderer: TilesRenderer | null = null;
   private activeBackend: 'glb' | 'tiles' = 'glb';
   // Fetched once per tiles model load (not per-pick/per-frame) -- see loadTilesModel().
-  private tiledLinkageMap: LinkageMapResponse | null = null;
   private tiledComponentCentroids: Map<string, THREE.Vector3> | null = null;
+  // Task 3: metadata.json (Task 2), indexed by file -- the tiled pick-resolution join target
+  // (see performTiledPick()/resolveTiledPickMetadata()). Supersedes tiledLinkageMap's own
+  // role in pick resolution (metadata.json already carries linkageKey per object); the
+  // linkage-map sidecar fetch above was removed for that reason -- see this task's design
+  // checkpoint finding #2 for why the old name-based mechanism never worked against real
+  // mago-3d-tiler output.
+  private tiledMetadataByFile: Map<string, TileObjectMetadata> | null = null;
 
   constructor(container: string | HTMLElement, opts: ViewerOptions = {}) {
     this.container = resolveContainer(container);
@@ -228,7 +286,7 @@ export class Viewer {
 
       if (selectLoadBackend(record) === 'tiles') {
         const artifactUrl = `${this.apiBaseUrl}${record.artifactUrl}`;
-        return this.loadTilesModel(artifactUrl, source.id, source.name ?? record.name);
+        return this.loadTilesModel(artifactUrl, record.metadataUrl, source.id, source.name ?? record.name);
       }
       // Falls through to the existing GLTFLoader path below for 'glb' (or a null
       // artifactType, from a revision published before this field existed).
@@ -272,6 +330,17 @@ export class Viewer {
     this.modelGroup = gltf.scene;
     this.scene.add(this.modelGroup);
 
+    // Georef positioning (Task 3 design-checkpoint sign-off item 2): only the server-pointer
+    // form has a stable catalog id with a real georef record to fetch -- a locally-loaded
+    // file (drag-drop / raw ArrayBuffer / bare URL) has no such id, matching how loadModel()
+    // already gates the tiles backend selection above. Before this task, this GLB path
+    // applied no georef transform at all (see finding #4) -- this is what makes "same as the
+    // GLB path" true for the tiles path's own positioning below, rather than aspirational.
+    if (modelPointerRecord) {
+      const rotationDeg = await this.fetchGeorefRotationDeg(id);
+      applyGeorefRotation(this.modelGroup, rotationDeg);
+    }
+
     const registry = buildSceneRegistry(this.modelGroup);
     this.tree = registry.tree;
     this.pickingRanges = registry.pickingRanges;
@@ -304,7 +373,7 @@ export class Viewer {
    * loadModel()'s own public signature/behavior is otherwise unchanged, so callers never know
    * which backend loaded.
    */
-  private async loadTilesModel(tilesetUrl: string, id: string, name: string): Promise<ModelInfo> {
+  private async loadTilesModel(tilesetUrl: string, metadataUrl: string | null, id: string, name: string): Promise<ModelInfo> {
     const tilesRenderer = new TilesRenderer(tilesetUrl);
     tilesRenderer.setCamera(this.camera);
     tilesRenderer.setResolutionFromRenderer(this.camera, this.renderer);
@@ -316,6 +385,15 @@ export class Viewer {
     // Support".
     const tilesGltfLoader = new GLTFLoader(tilesRenderer.manager);
     tilesGltfLoader.setDRACOLoader(this.dracoLoader);
+    // Task 3 design-checkpoint finding #1: mago-3d-tiler embeds real per-object identity via
+    // the standard EXT_mesh_features/EXT_structural_metadata extensions -- these plugins
+    // attach MeshFeatures/StructuralMetadata instances to each loaded mesh's userData
+    // (mesh.userData.meshFeatures / .structuralMetadata), which performTiledPick() reads.
+    // Without registering these, GLTFLoader parses the extensions' raw JSON but exposes none
+    // of it -- confirmed against gltf-transform's own NodeIO, which does exactly that (silent
+    // drop + a "missing optional extension" warning) unless the extension is registered.
+    tilesGltfLoader.register((parser) => new MeshFeaturesExtensionCtor(parser));
+    tilesGltfLoader.register((parser) => new StructuralMetadataExtensionCtor(parser));
     tilesRenderer.manager.addHandler(/\.(gltf|glb)$/g, tilesGltfLoader);
 
     // ~1GB memory budget for the tile cache (task requirement) -- see TILES_CACHE_MAX_BYTES's
@@ -346,7 +424,7 @@ export class Viewer {
       tilesRenderer.addEventListener('load-root-tileset', onLoad);
     });
 
-    this.scene.add(tilesRenderer.group);
+    this.scene.add(asObject3D(tilesRenderer.group));
     this.tilesRenderer = tilesRenderer;
     this.activeBackend = 'tiles';
 
@@ -356,12 +434,29 @@ export class Viewer {
     // point of streaming.
     await rootTilesetLoaded;
 
-    const [linkageMap, componentBboxes] = await Promise.all([this.fetchLinkageMap(id), this.fetchComponentBboxes(id)]);
-    this.tiledLinkageMap = linkageMap;
+    const [metadataObjects, componentBboxes, rotationDeg] = await Promise.all([
+      this.fetchTileMetadata(metadataUrl),
+      this.fetchComponentBboxes(id),
+      this.fetchGeorefRotationDeg(id),
+    ]);
+    this.tiledMetadataByFile = indexMetadataByFile(metadataObjects);
     this.tiledComponentCentroids = computeTiledCentroids(componentBboxes);
 
+    // Georef positioning (design-checkpoint sign-off item 2): never trust mago's own
+    // boundingVolume.region (garbage -- task2-findings.md, binding) -- apply this platform's
+    // own resolved rotation instead, via the SAME shared helper the GLB path above uses, so
+    // the two backends can never disagree on sign convention. updateMatrixWorld(true) is
+    // forced here (rather than left to the next render frame) since fitToModel() below reads
+    // the world-space bounding sphere synchronously, before any frame has rendered.
+    applyGeorefRotation(asObject3D(tilesRenderer.group), rotationDeg);
+    asObject3D(tilesRenderer.group).updateMatrixWorld(true);
+
+    // getBoundingSphere() returns the sphere in the group's LOCAL space (3d-tiles-renderer's
+    // own API doc) -- must be transformed into world space to reflect the rotation just
+    // applied above, or bbox/camera-framing math would silently use the pre-rotation extent.
     const sphere = new THREE.Sphere();
     tilesRenderer.getBoundingSphere(sphere);
+    sphere.applyMatrix4(asObject3D(tilesRenderer.group).matrixWorld);
     const bbox: BoundingBox = {
       min: { x: sphere.center.x - sphere.radius, y: sphere.center.y - sphere.radius, z: sphere.center.z - sphere.radius },
       max: { x: sphere.center.x + sphere.radius, y: sphere.center.y + sphere.radius, z: sphere.center.z + sphere.radius },
@@ -371,7 +466,7 @@ export class Viewer {
       id,
       name,
       format: 'tiles',
-      objectCount: Object.keys(linkageMap).length,
+      objectCount: metadataObjects.length,
       bbox,
     };
 
@@ -382,13 +477,34 @@ export class Viewer {
     return modelInfo;
   }
 
-  private async fetchLinkageMap(modelId: string): Promise<LinkageMapResponse> {
+  /** metadataUrl is null when the model has no metadata.json (predates Task 2, or isn't a
+   * tiles-backed model at all -- loadTilesModel() only calls this on the tiles branch, but
+   * metadataUrl can still be null for a tiles revision published before this field existed).
+   * Same defensive-read pattern as fetchComponentBboxes below: a fetch failure degrades to
+   * "no metadata", never a thrown error that would abort the whole model load. */
+  private async fetchTileMetadata(metadataUrl: string | null): Promise<TileObjectMetadata[]> {
+    if (!metadataUrl) return [];
     try {
-      const res = await fetch(`${this.apiBaseUrl}/api/models/${modelId}/linkage-map`);
-      if (!res.ok) return {};
-      return (await res.json()) as LinkageMapResponse;
+      const res = await fetch(`${this.apiBaseUrl}${metadataUrl}`);
+      if (!res.ok) return [];
+      const doc = (await res.json()) as TileMetadataDocument;
+      return doc.objects;
     } catch {
-      return {};
+      return [];
+    }
+  }
+
+  /** GET /api/models/{id}/georef -- same endpoint MapGeorefPlugin's own 2D map already uses.
+   * A 404 (no georef saved for this model) resolves to rotationDeg 0, matching that plugin's
+   * own catch-and-default behavior -- never a thrown error. */
+  private async fetchGeorefRotationDeg(modelId: string): Promise<number> {
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/api/models/${modelId}/georef`);
+      if (!res.ok) return 0;
+      const record = (await res.json()) as GeorefResponse;
+      return record.rotationDeg;
+    } catch {
+      return 0;
     }
   }
 
@@ -425,12 +541,12 @@ export class Viewer {
     }
 
     if (this.tilesRenderer) {
-      this.scene.remove(this.tilesRenderer.group);
+      this.scene.remove(asObject3D(this.tilesRenderer.group));
       this.tilesRenderer.dispose();
       this.tilesRenderer = null;
     }
     this.activeBackend = 'glb';
-    this.tiledLinkageMap = null;
+    this.tiledMetadataByFile = null;
     this.tiledComponentCentroids = null;
   }
 
@@ -523,6 +639,9 @@ export class Viewer {
       // regardless of what's currently loaded.
       const sphere = new THREE.Sphere();
       this.tilesRenderer.getBoundingSphere(sphere);
+      // getBoundingSphere() is in the group's LOCAL space -- transform into world space so
+      // the georef rotation applied in loadTilesModel() is reflected in the framed region.
+      sphere.applyMatrix4(asObject3D(this.tilesRenderer.group).matrixWorld);
       this.frameBox(new THREE.Box3().setFromCenterAndSize(sphere.center, new THREE.Vector3(1, 1, 1).multiplyScalar(sphere.radius * 2)));
       return;
     }
@@ -656,22 +775,28 @@ export class Viewer {
    * ranges the way GLB models do (the O(log n) resolveObjectByTriangleIndex() resolver
    * assumes exactly that) -- tiles stream in and out independently and mago-3d-tiler's own
    * per-tile mesh layout can't be assumed stable. Instead this raycasts directly against
-   * whatever tile geometry is currently loaded (tilesRenderer.group) and resolves the hit to
-   * a Linkage key via the mesh's own `name` (set from the source glTF node/mesh name) against
-   * the linkage-map sidecar fetched once at load time -- see loadTilesModel()'s doc comment.
-   * A hit on a mesh with no linkage-map entry (or no linkage map at all, e.g. no Linkages
-   * properties were recovered from the source FBX) can't be identified and returns null
-   * rather than a guessed/wrong id.
+   * whatever tile geometry is currently loaded (tilesRenderer.group) and resolves the hit via
+   * the real per-object identity mago embeds through the standard EXT_mesh_features /
+   * EXT_structural_metadata extensions (Task 3 design-checkpoint finding #1) -- NOT the hit
+   * mesh's own `.name`, which real mago-3d-tiler output never sets to anything distinguishing
+   * (finding #2; see resolveTiledPickMetadata()'s own doc comment in internal/tiles.ts for the
+   * full feature-id -> property-table -> metadata.json walk). A hit that can't be resolved
+   * this way (extensions not registered, no matching metadata.json entry) returns null rather
+   * than a guessed/wrong id.
    */
   private performTiledPick(x: number, y: number): PickResult | null {
     if (!this.tilesRenderer) return null;
 
-    const hits = this.raycaster.intersectObject(this.tilesRenderer.group, true);
+    const hits = this.raycaster.intersectObject(asObject3D(this.tilesRenderer.group), true);
     const hit = hits[0];
     if (!hit) return null;
 
-    const objectId = resolveTiledObjectId(hit.object, this.tiledLinkageMap);
-    if (!objectId) return null;
+    const metadata = resolveTiledPickMetadata(
+      { object: hit.object, faceIndex: hit.faceIndex ?? null, point: hit.point },
+      this.tiledMetadataByFile,
+    );
+    if (!metadata) return null;
+    const objectId = tiledPickObjectId(metadata);
 
     return {
       objectId,

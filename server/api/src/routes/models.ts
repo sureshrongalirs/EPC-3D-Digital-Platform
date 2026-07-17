@@ -137,6 +137,27 @@ export function createModelsRouter(db: Database, config: Config): Router {
     res.type('application/json').send(raw);
   });
 
+  // GET /api/models/{id}/metadata — Task 2's metadata.json sidecar (per-object identity:
+  // name/path/kind/linkageKey/triangleCount/mergedFrom), written by server/worker's
+  // splitter.ts alongside tileset.json for a tiles-backed revision. 404 if the model's
+  // current revision has no such sidecar (not a tiles revision, or predates this field) --
+  // same defensive-read pattern as the linkage-map route above, not an assumption that the
+  // file exists just because artifactType is 'tiles'.
+  router.get('/models/:id/metadata', async (req, res) => {
+    const row = await getModelRow(db, req.params.id);
+    if (!row) throw notFound(`model ${req.params.id} not found`);
+    if (row.current_revision === null) throw notFound(`model ${req.params.id} has no published revision`);
+
+    const metadataPath = path.join(config.modelsArtifactsDir, row.id, String(row.current_revision), 'metadata.json');
+    let raw: string;
+    try {
+      raw = await fsp.readFile(metadataPath, 'utf8');
+    } catch {
+      throw notFound(`no metadata.json for model ${req.params.id}`);
+    }
+    res.type('application/json').send(raw);
+  });
+
   // DELETE /api/models/{id} — remove files + rows.
   router.delete('/models/:id', async (req, res) => {
     const row = await getModelRow(db, req.params.id);

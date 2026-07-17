@@ -1,12 +1,17 @@
 import type { Knex } from 'knex';
 
 import type { Database } from '../db/index.js';
+import { serializeJsonColumn } from '../lib/json.js';
+import type { TilesSummary } from '../types.js';
 
 export interface PublishParams {
   modelId: string;
   revision: number;
   artifactType: 'glb' | 'tiles';
   artifactPath: string;
+  /** Task 3 deliverable 4 -- see TilesSummary's own doc comment. Only meaningful for
+   * artifactType 'tiles'; omitted (stored null) otherwise. */
+  tilesSummary?: TilesSummary;
 }
 
 export interface PublishOptions {
@@ -36,6 +41,7 @@ export async function publishRevision(
       revision: params.revision,
       artifact_type: params.artifactType,
       artifact_path: params.artifactPath,
+      tiles_summary: params.tilesSummary ? serializeJsonColumn(params.tilesSummary) : null,
     });
 
     if (options.afterRevisionInsert) {

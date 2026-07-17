@@ -1,8 +1,21 @@
 import type { Database } from '../db/index.js';
 import { parseBbox, parseJsonColumn, serializeJsonColumn } from '../lib/json.js';
-import type { ArtifactType, ModelDto, ModelRow, RevisionRow, SourceFileRef } from '../types.js';
+import type { ArtifactType, ModelDto, ModelRow, RevisionRow, SourceFileRef, TilesSummary } from '../types.js';
 
-export function toModelDto(row: ModelRow, artifactUrl: string | null, artifactType: ArtifactType | null = null): ModelDto {
+export interface ArtifactInfo {
+  artifactUrl: string | null;
+  artifactType: ArtifactType | null;
+  /** Needed (alongside row.id) to derive tilesetUrl/metadataUrl -- both are constructed
+   * directly from the id/revision/DATA_DIR convention (matching the existing linkage-map
+   * route's own convention), not by string-parsing artifactUrl. */
+  revision: number | null;
+  tilesSummary: TilesSummary | null;
+}
+
+const NO_ARTIFACT: ArtifactInfo = { artifactUrl: null, artifactType: null, revision: null, tilesSummary: null };
+
+export function toModelDto(row: ModelRow, artifact: ArtifactInfo = NO_ARTIFACT): ModelDto {
+  const isTiles = artifact.artifactType === 'tiles' && artifact.revision !== null;
   return {
     id: row.id,
     name: row.name,
@@ -17,8 +30,12 @@ export function toModelDto(row: ModelRow, artifactUrl: string | null, artifactTy
     error: row.error,
     warnings: parseJsonColumn<string[]>(row.warnings) ?? [],
     sourceFiles: parseJsonColumn<SourceFileRef[]>(row.source_files) ?? [],
-    artifactUrl,
-    artifactType,
+    artifactUrl: artifact.artifactUrl,
+    artifactType: artifact.artifactType,
+    renderPath: artifact.artifactType,
+    tilesetUrl: isTiles ? artifact.artifactUrl : null,
+    metadataUrl: isTiles ? `/files/models/artifacts/${row.id}/${artifact.revision}/metadata.json` : null,
+    tilesSummary: artifact.tilesSummary,
   };
 }
 
@@ -74,16 +91,17 @@ async function getArtifactRevision(
   db: Database,
   modelId: string,
   revision: number | null,
-): Promise<Pick<RevisionRow, 'artifact_path' | 'artifact_type'> | undefined> {
+): Promise<Pick<RevisionRow, 'artifact_path' | 'artifact_type' | 'tiles_summary'> | undefined> {
   if (revision === null) return undefined;
   return db.knex<RevisionRow>('revisions').where({ model_id: modelId, revision }).first();
 }
 
 export async function toModelDtoWithArtifact(db: Database, row: ModelRow): Promise<ModelDto> {
   const revisionRow = await getArtifactRevision(db, row.id, row.current_revision);
-  return toModelDto(
-    row,
-    revisionRow ? `/files/${revisionRow.artifact_path}` : null,
-    revisionRow?.artifact_type ?? null,
-  );
+  return toModelDto(row, {
+    artifactUrl: revisionRow ? `/files/${revisionRow.artifact_path}` : null,
+    artifactType: revisionRow?.artifact_type ?? null,
+    revision: revisionRow ? row.current_revision : null,
+    tilesSummary: revisionRow ? parseJsonColumn<TilesSummary>(revisionRow.tiles_summary) : null,
+  });
 }

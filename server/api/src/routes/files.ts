@@ -43,6 +43,11 @@ export function createFilesRouter(config: Config): Router {
       'Cache-Control',
       relative.startsWith('models/artifacts/') ? 'public, max-age=31536000, immutable' : 'no-cache',
     );
+    // Task 3 deliverable 1: revision-addressed content never changes in place (a republish
+    // writes a whole new revision directory, never overwrites an existing one -- CLAUDE.md
+    // invariant #6), so size+mtime is a cheap, sufficient identity for a weak ETag here; no
+    // need to hash file content.
+    res.setHeader('ETag', `W/"${stat.size}-${stat.mtimeMs}"`);
 
     const range = req.headers.range;
     if (!range) {

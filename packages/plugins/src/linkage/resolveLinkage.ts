@@ -1,4 +1,10 @@
-import { findBestTrigramMatch, type BoundingBox, type ComponentRecord, type Vector3Like } from '@plantscope/shared';
+import {
+  findBestTrigramMatch,
+  type BoundingBox,
+  type ComponentRecord,
+  type TileObjectMetadata,
+  type Vector3Like,
+} from '@plantscope/shared';
 
 export interface LabelIndexEntry {
   label: string;
@@ -11,6 +17,12 @@ export interface LinkageLookupOptions {
   /** Fuzzy-match candidates for tier (b) when no exact linkage key is found. */
   labelIndex: LabelIndexEntry[];
   fuzzyThreshold?: number;
+  /** Task 3: a tiles-backed model's metadata.json, indexed by both `file` and (when present)
+   * `linkageKey` -- a pick's nodeName input here is `linkageKey ?? file` (see
+   * @plantscope/core's tiledPickObjectId), so indexing by both means the lookup succeeds
+   * regardless of which one it turned out to be. Absent for a GLB-backed model, which has no
+   * metadata.json at all. */
+  metadataByObjectId?: Record<string, TileObjectMetadata>;
 }
 
 export type LinkageLookupResult =
@@ -22,6 +34,7 @@ export type LinkageLookupResult =
       matchedLabel: string;
       score: number;
     }
+  | { tier: 'metadata-record'; record: TileObjectMetadata }
   | { tier: 'geometry-only'; bbox: BoundingBox; centroid: Vector3Like; note: string }
   | { tier: 'not-found' };
 
@@ -31,9 +44,12 @@ const GEOMETRY_ONLY_NOTE =
 
 /**
  * Degradation tiers, in order: (a) exact linkage key -> full join; (b) no key, but the node
- * name fuzzy-matches a mock label (trigram similarity) -> matched join; (c) neither ->
- * geometry-only facts. Pure aside from `fetchComponent`, so it's unit-testable without a
- * real PluginContext — see resolveLinkage.test.ts.
+ * name fuzzy-matches a mock label (trigram similarity) -> matched join; (c) a components-table
+ * join exists for neither, but a tiles-backed model's metadata.json record does (Task 3
+ * design-checkpoint sign-off item 1) -> metadata-record, honestly labeled as structural
+ * metadata rather than an engineering join; (d) none of the above -> geometry-only facts (or
+ * not-found if there's no geometry either). Pure aside from `fetchComponent`, so it's
+ * unit-testable without a real PluginContext — see resolveLinkage.test.ts.
  */
 export async function resolveLinkage(
   nodeName: string,
@@ -66,6 +82,11 @@ export async function resolveLinkage(
     } catch {
       // Matched label's key doesn't resolve either — fall through to geometry-only.
     }
+  }
+
+  const metadataRecord = options.metadataByObjectId?.[nodeName];
+  if (metadataRecord) {
+    return { tier: 'metadata-record', record: metadataRecord };
   }
 
   if (geometryFacts) {

@@ -133,6 +133,17 @@ const migrations: Migration[] = [
       });
     },
   },
+  {
+    id: '003_revision_tiles_summary',
+    up: async (knex, dialect) => {
+      // Ops-visibility (Task 3 deliverable 4): a tiles job's completion summary (input size,
+      // object count, tile count, max tile bytes, duration, repair-fired flag), previously
+      // only in ephemeral warnings strings / worker logs. Null for 'glb' revisions.
+      await knex.schema.alterTable('revisions', (table) => {
+        jsonColumn(table, dialect, 'tiles_summary');
+      });
+    },
+  },
 ];
 
 export async function runMigrations(db: Database): Promise<void> {

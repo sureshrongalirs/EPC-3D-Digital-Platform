@@ -1,4 +1,4 @@
-import type { Database, SourceFileRef } from '@plantscope/server-shared';
+import type { Database, SourceFileRef, TilesSummary } from '@plantscope/server-shared';
 
 export interface ProbeReport {
   /** Rough peak-memory estimate for this job, used by the queue to decide whether it must
@@ -43,6 +43,9 @@ export interface ConvertResult {
     artifactType: 'glb' | 'tiles';
     /** Path relative to DATA_DIR, suitable for storage in revisions.artifact_path. */
     artifactPath: string;
+    /** Task 3 deliverable 4 -- only set for artifactType 'tiles' (see tiles/index.ts's
+     * tileGlb()). */
+    tilesSummary?: TilesSummary;
   };
   linkageMap?: Map<string, string>;
   warnings: string[];

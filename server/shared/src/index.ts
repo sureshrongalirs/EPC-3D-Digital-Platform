@@ -76,6 +76,7 @@ export type {
   SiteDto,
   SiteRow,
   SourceFileRef,
+  TilesSummary,
   ZoneDto,
   ZoneMemberRow,
   ZoneRow,

@@ -47,6 +47,31 @@ export interface ModelDto {
    * lifecycle) -- lets @plantscope/core's Viewer.loadModel() route between GLTFLoader and
    * the OGC 3D Tiles renderer without guessing from the URL's extension. */
   artifactType: ArtifactType | null;
+  /** Same value as artifactType -- Task 3's client-facing name for the same routing
+   * decision. Both are kept (rather than renaming artifactType) since artifactType is
+   * already referenced by selectLoadBackend/tests/CLAUDE.md's own Phase 5 notes. */
+  renderPath: ArtifactType | null;
+  /** For renderPath 'tiles' only: the tileset.json URL (today identical to artifactUrl,
+   * named for what a tiles-aware client actually wants rather than overloading one field
+   * for two backends). Null for 'glb' or an unpublished model. */
+  tilesetUrl: string | null;
+  /** For renderPath 'tiles' only: Task 2's metadata.json sidecar (per-object identity --
+   * name/path/kind/linkageKey/triangleCount/mergedFrom), served via GET
+   * /api/models/{id}/metadata. Null for 'glb' or an unpublished model. */
+  metadataUrl: string | null;
+  /** Task 3 deliverable 4 -- see TilesSummary's own doc comment. */
+  tilesSummary: TilesSummary | null;
+}
+
+/** Ops-visibility summary for a tiles job (Task 3 deliverable 4) -- null for a 'glb'
+ * revision, or a 'tiles' revision published before this field existed. */
+export interface TilesSummary {
+  inputSizeBytes: number;
+  objectCount: number;
+  tileCount: number;
+  maxTileBytes: number;
+  durationMs: number;
+  repairFired: boolean;
 }
 
 export interface RevisionRow {
@@ -55,6 +80,7 @@ export interface RevisionRow {
   artifact_type: ArtifactType;
   artifact_path: string;
   published_at: string;
+  tiles_summary: string | null;
 }
 
 export interface ComponentRow {

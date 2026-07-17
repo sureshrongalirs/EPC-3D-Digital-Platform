@@ -71,7 +71,12 @@ describe('fbxAdapter.convert() size routing (CLAUDE.md invariant #4)', () => {
       const sourcePath = path.join(dir, 'model.fbx');
       await fsp.writeFile(sourcePath, Buffer.alloc(1024));
 
-      mockedTileGlb.mockResolvedValue({ tilesetPath: path.join(dir, 'tileset.json'), metadataPath: path.join(dir, 'metadata.json'), warnings: [] });
+      mockedTileGlb.mockResolvedValue({
+        tilesetPath: path.join(dir, 'tileset.json'),
+        metadataPath: path.join(dir, 'metadata.json'),
+        warnings: [],
+        summary: { inputSizeBytes: 1024, objectCount: 1, tileCount: 1, maxTileBytes: 100, durationMs: 1, repairFired: false },
+      });
 
       const ctx: ConvertContext = {
         db: {} as ConvertContext['db'],

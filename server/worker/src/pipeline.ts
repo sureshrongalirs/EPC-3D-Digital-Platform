@@ -130,6 +130,7 @@ export async function processJob(db: Database, config: Config, logger: Logger, m
       revision,
       artifactType: artifact.artifactType,
       artifactPath: artifact.artifactPath,
+      tilesSummary: artifact.tilesSummary,
     });
   } else {
     // Georef-only (e.g. a lone LLH upload) or metadata-only job: nothing to publish, but the

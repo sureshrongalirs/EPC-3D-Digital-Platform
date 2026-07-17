@@ -81,6 +81,7 @@ export const fbxAdapter: FormatAdapter = {
       const tilingResult = await tileGlb(rawGlbPath, ctx.outDir, linkageMap, {
         triangleFloor: ctx.splitterTriangleFloor,
         blobWarnRatio: ctx.splitterBlobWarnRatio,
+        inputSizeBytes: sourceStat.size,
       });
       warnings.push(...tilingResult.warnings);
 
@@ -88,6 +89,7 @@ export const fbxAdapter: FormatAdapter = {
         artifact: {
           artifactType: 'tiles',
           artifactPath: path.relative(ctx.dataDir, tilingResult.tilesetPath).split(path.sep).join('/'),
+          tilesSummary: tilingResult.summary,
         },
         linkageMap,
         warnings,

@@ -95,15 +95,14 @@ plugin — do not misread this as bending or breaking invariant #1.
   `packages/globe-view/src/transform.ts` for the plant-local → ECEF math, which deliberately
   mirrors `@plantscope/shared`'s existing `localToLatLon`'s rotation convention (rotationDeg =
   degrees clockwise from north) so the two never disagree about which way "rotated" points.
-- **apps/demo currently uses only the globe view.** An earlier version wired a 2D Map/Georef
-  ↔ 3D Globe tab toggle (both views side by side); the three.js `Viewer`, its plugins
-  (`ZonesPlugin`/`MapGeorefPlugin`/`LinkageMetadataPlugin`), and the tab-switching UI were
-  later removed from `apps/demo` entirely so the globe is the app's only, primary view — see
-  its own git history for that change. `@plantscope/core` and `@plantscope/plugins` are
-  untouched and remain valid for any other consumer; `apps/demo` simply isn't one anymore.
-  A model with no georef record is still shown (not left unplaced) at a clearly-labeled
-  default location (`GlobeView.DEFAULT_FALLBACK_ANCHOR`, Hyderabad) rather than refusing to
-  render it.
+- **apps/demo currently uses the three.js `Viewer` again, not the globe view** (commit
+  `5892a59`, "temporarily disable the CesiumJS globe view" — this superseded an even earlier
+  state where the globe view was the app's only view; see the "Out-of-sequence addition"
+  paragraph at the end of this document, which already reflected this correctly — this bullet
+  was the stale one, corrected during Phase 5R Task 3). `apps/demo/src/main.ts` wires up
+  `Viewer` plus `ZonesPlugin`/`MapGeorefPlugin`/`LinkageMetadataPlugin`. `@plantscope/globe-view`
+  itself is untouched, not deleted, and ready to be re-enabled per that same paragraph's own
+  guidance once a real need arises.
 - Terrain/imagery defaults to Cesium Ion's hosted assets for developer convenience (that is a
   real, currently-unavoidable exception to invariant #7's "no cloud provider dependency" for
   the *default* dev experience — see `packages/globe-view`'s `GlobeProviderConfig` and its
@@ -175,11 +174,22 @@ sessions.
   comparing the source file's size against `sizeThresholdMb`, both branches sharing the same
   assimp export step). `ModelDto.artifactType` (`'glb' | 'tiles' | null`) is what
   `Viewer.loadModel()` actually routes on — callers never choose or see which backend loaded.
-  Tiled picking resolves through the linkage-map sidecar (`GET /api/models/{id}/linkage-map`)
-  rather than the GLB path's O(log n) triangle-range resolver, since tiles have no stable
-  contiguous index ranges; tiled `getObjectScreenCentroids()` reads component bboxes (`GET
-  /api/components?model={id}&fields=bbox`) instead of live scene geometry, since an object's
-  tile may not currently be streamed in. **Known gap, not silently glossed over:**
+  Tiled picking does NOT use the O(log n) triangle-range resolver the GLB path uses (tiles have
+  no stable contiguous index ranges) — nor, as of Phase 5R Task 3, does it resolve through the
+  mesh's own node name against the linkage-map sidecar the way this paragraph originally said:
+  real mago-3d-tiler output never sets a distinguishing node name on tile content (every node is
+  a generic `"node"`), so that mechanism was dead code from the start (see
+  `docs/phase5r/task3-findings.md` finding #2). mago-3d-tiler does embed real per-object identity,
+  via the standard `EXT_mesh_features`/`EXT_structural_metadata` glTF extensions (per-primitive
+  feature IDs indexing a property table whose `FileName` column matches Task 2's `metadata.json`
+  `file` field byte-for-byte) — `performTiledPick()` reads this via `3d-tiles-renderer`'s
+  `GLTFMeshFeaturesExtension`/`GLTFStructuralMetadataExtension` loader plugins, registered in
+  `Viewer.ts`'s `loadTilesModel()`, resolving to a `metadata.json` record (fetched once at load
+  time via `ModelDto.metadataUrl`) rather than a Linkage key directly; `PickResult.objectId` is
+  that record's `linkageKey` when present, else its `file` (linkage coverage is optional). See
+  `internal/tiles.ts`'s `resolveTiledPickMetadata()`. Tiled `getObjectScreenCentroids()` reads
+  component bboxes (`GET /api/components?model={id}&fields=bbox`) instead of live scene geometry,
+  since an object's tile may not currently be streamed in. **Known gap, not silently glossed over:**
   `mago-3d-tiler` does not apply Draco compression natively (confirmed against its own docs)
   and per-tile Draco re-compression was left unimplemented since there was no real
   `mago-3d-tiler` output available in the environment this was built in to validate it
