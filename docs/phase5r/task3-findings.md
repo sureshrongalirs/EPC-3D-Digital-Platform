@@ -111,18 +111,25 @@ it's ever absent, since the type is `Vector3 | null | undefined`).
 
 **Reload race: `loadModel()`/`loadTilesModel()` have no concurrency guard against a second
 `loadModel()` call superseding the first while it's mid-flight on an async fetch.** PR #14
-verification's adversarial pass found this concretely at the georef-rotation fetch (see
-`internal/georefTransform.ts`'s `applyGeorefRotationIfStillCurrent()`, added as a narrow
-symptom guard — it stops a stale continuation from throwing on a null `this.modelGroup` or
-misapplying a rotation to a newer, superseding model, but does nothing about the rest of a
-stale continuation's work: `fitToModel()`, the `modelLoaded` event, and — for the tiles path
-specifically — a superseded `TilesRenderer` instance never getting removed from the scene,
-since `unloadModel()` only ever touches the *current* `this.tilesRenderer`, leaking the stale
-one's geometry). The real fix is a load-generation counter: `loadModel()` increments a
-counter and captures its own generation number at entry; every continuation after an await
-checks its captured generation against the live one and bails out entirely (not just the
-rotation step) if it's stale. This resolves the whole class of bug at once, rather than one
-narrow symptom at a time. Note this is exactly the kind of state a future multi-model
-`ModelManager` (tracking several concurrently-loaded models, per the phase-opening caching
-design) would need to build anyway — that architecture should absorb this fix wholesale
-rather than this being patched incrementally per call site.
+verification's adversarial pass first found this at the georef-rotation fetch specifically
+(`applyGeorefRotationIfStillCurrent()`, a narrow symptom guard covering only that one line);
+a follow-up read then showed that guard insufficient — `buildSceneRegistry(this.modelGroup)`,
+called unconditionally one line later, hit the identical crash the rotation guard didn't
+cover, and (in `loadTilesModel()`) `this.tiledMetadataByFile`/`this.tiledComponentCentroids`
+were mutated unconditionally before the guard ran at all. Fixed structurally rather than with
+another spot-guard: `internal/reloadGuard.ts`'s `runIfStillCurrent()` now wraps the *entire*
+post-await continuation in both branches (registry rebuild, `this.*` mutation, bbox/modelInfo
+construction, `fitToModel()`, the `modelLoaded` emit) — a stale continuation runs none of it,
+not just skips one line of it. `loadModel()`/`loadTilesModel()` now return `Promise<ModelInfo
+| undefined>`, resolving to `undefined` (never a throw) when the call lost the race.
+
+This closes every *currently known* staleness window (both branches' sole await points), but
+remains per-await-site discipline, not a general mechanism — a future third await added to
+either method would need its own explicit `runIfStillCurrent()` wrapping to stay safe; nothing
+enforces that structurally. The real, general fix is still a load-generation counter:
+`loadModel()` increments a counter and captures its own generation number at entry, and every
+continuation after every await (present or future) checks its captured generation against the
+live one, with no per-call-site wrapping required. This is exactly the kind of state a future
+multi-model `ModelManager` (tracking several concurrently-loaded models, per the
+phase-opening caching design) would need to build anyway — that architecture should absorb
+this fix wholesale rather than this continuing to be patched per await site.

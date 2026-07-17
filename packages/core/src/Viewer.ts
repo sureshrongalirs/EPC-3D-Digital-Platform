@@ -17,10 +17,11 @@ import { GLTFMeshFeaturesExtension, GLTFStructuralMetadataExtension } from '3d-t
 
 import { createPanelSlot, createToolbarSlot } from './internal/domSlots';
 import { EventBusImpl } from './internal/eventBus';
-import { applyGeorefRotation, applyGeorefRotationIfStillCurrent } from './internal/georefTransform';
+import { applyGeorefRotation } from './internal/georefTransform';
 import { createColorizeMaterial, createHighlightMaterial } from './internal/highlight';
 import { resolveObjectByTriangleIndex } from './internal/picking';
 import { PluginHost } from './internal/pluginHost';
+import { runIfStillCurrent } from './internal/reloadGuard';
 import { RestClientImpl } from './internal/restClient';
 import { buildSceneRegistry, searchSceneObjects, type SceneObjectRecord } from './internal/sceneRegistry';
 import {
@@ -263,7 +264,13 @@ export class Viewer {
     this.animate();
   }
 
-  async loadModel(source: string | ArrayBuffer | ModelPointer): Promise<ModelInfo> {
+  /**
+   * Returns `undefined` (never a throw) when this exact call lost a reload race -- a second
+   * `loadModel()` call superseded this one's model while an internal await (the georef fetch,
+   * for the server-pointer form) was in flight. See `internal/reloadGuard.ts`'s own doc
+   * comment for why this had to become the return contract rather than a narrower guard.
+   */
+  async loadModel(source: string | ArrayBuffer | ModelPointer): Promise<ModelInfo | undefined> {
     this.unloadModel();
 
     // Server-pointer form is the only one that can ever resolve to the tiles backend --
@@ -329,6 +336,42 @@ export class Viewer {
 
     this.modelGroup = gltf.scene;
     this.scene.add(this.modelGroup);
+    // Captured once, right after assignment -- every read below uses this local, never
+    // `this.modelGroup` again, so nothing downstream of the georef await can observe a
+    // different (superseding) model even by accident.
+    const loadedGroup = this.modelGroup;
+
+    // Builds the ModelInfo and fires every observable side effect (registry, fitToModel,
+    // modelLoaded events) -- pulled into its own closure so it can be wrapped in
+    // runIfStillCurrent() below without duplicating this logic for the two call sites
+    // (guarded, for the server-pointer/georef case; unconditional otherwise, since a
+    // locally-loaded file never awaits anything past this point and so can never lose a
+    // reload race in the first place).
+    const finish = (): ModelInfo => {
+      const registry = buildSceneRegistry(loadedGroup);
+      this.tree = registry.tree;
+      this.pickingRanges = registry.pickingRanges;
+      this.pickingProxy = registry.pickingProxy;
+
+      for (const [objectId, record] of registry.objects) {
+        this.objectRecords.set(objectId, { ...record, originalMaterial: record.mesh.material });
+      }
+
+      const bbox = new THREE.Box3().setFromObject(loadedGroup);
+      const modelInfo: ModelInfo = {
+        id,
+        name,
+        format,
+        objectCount: this.objectRecords.size,
+        bbox: toSharedBoundingBox(bbox),
+      };
+
+      this.fitToModel();
+      this.events.emit('modelLoaded', modelInfo);
+      this.pluginHost.notifyModelLoaded(modelInfo);
+
+      return modelInfo;
+    };
 
     // Georef positioning (Task 3 design-checkpoint sign-off item 2): only the server-pointer
     // form has a stable catalog id with a real georef record to fetch -- a locally-loaded
@@ -337,40 +380,25 @@ export class Viewer {
     // applied no georef transform at all (see finding #4) -- this is what makes "same as the
     // GLB path" true for the tiles path's own positioning below, rather than aspirational.
     //
-    // applyGeorefRotationIfStillCurrent (PR #14 verification's adversarial finding): the fetch
-    // below is an unguarded await -- a second loadModel() call racing in while it's in flight
-    // would already have replaced this.modelGroup by the time it resolves. loadedGroup is
-    // captured now, before the await, so the guard can detect that and silently skip applying
-    // a stale rotation rather than throwing (unloadModel() nulled this.modelGroup) or rotating
-    // the wrong, superseding model.
+    // Reload-race guard (PR #14 verification's adversarial finding, then its own follow-up):
+    // the fetch below is an unguarded await -- a second loadModel() call racing in while it's
+    // in flight would already have replaced this.modelGroup by the time it resolves. An
+    // earlier version of this guard covered only the rotation-application call; that left
+    // `finish()`'s own work (buildSceneRegistry et al) completely unguarded one line later,
+    // hitting the identical crash. runIfStillCurrent() now wraps the ENTIRE rest of this
+    // load -- if stale, finish() is never even called, so nothing it does (this.tree/
+    // this.pickingRanges/this.objectRecords mutation, the modelLoaded emit, fitToModel())
+    // runs for an abandoned load. loadModel() returns `undefined` in that case -- see its own
+    // doc comment.
     if (modelPointerRecord) {
-      const loadedGroup = this.modelGroup;
-      await applyGeorefRotationIfStillCurrent(loadedGroup, () => this.modelGroup, () => this.fetchGeorefRotationDeg(id));
+      const rotationDeg = await this.fetchGeorefRotationDeg(id);
+      return runIfStillCurrent(loadedGroup, () => this.modelGroup, () => {
+        applyGeorefRotation(loadedGroup, rotationDeg);
+        return finish();
+      });
     }
 
-    const registry = buildSceneRegistry(this.modelGroup);
-    this.tree = registry.tree;
-    this.pickingRanges = registry.pickingRanges;
-    this.pickingProxy = registry.pickingProxy;
-
-    for (const [objectId, record] of registry.objects) {
-      this.objectRecords.set(objectId, { ...record, originalMaterial: record.mesh.material });
-    }
-
-    const bbox = new THREE.Box3().setFromObject(this.modelGroup);
-    const modelInfo: ModelInfo = {
-      id,
-      name,
-      format,
-      objectCount: this.objectRecords.size,
-      bbox: toSharedBoundingBox(bbox),
-    };
-
-    this.fitToModel();
-    this.events.emit('modelLoaded', modelInfo);
-    this.pluginHost.notifyModelLoaded(modelInfo);
-
-    return modelInfo;
+    return finish();
   }
 
   /**
@@ -380,7 +408,9 @@ export class Viewer {
    * loadModel()'s own public signature/behavior is otherwise unchanged, so callers never know
    * which backend loaded.
    */
-  private async loadTilesModel(tilesetUrl: string, metadataUrl: string | null, id: string, name: string): Promise<ModelInfo> {
+  /** Returns `undefined` (never a throw) when this call lost a reload race -- see
+   * loadModel()'s own doc comment; the same contract applies here. */
+  private async loadTilesModel(tilesetUrl: string, metadataUrl: string | null, id: string, name: string): Promise<ModelInfo | undefined> {
     const tilesRenderer = new TilesRenderer(tilesetUrl);
     tilesRenderer.setCamera(this.camera);
     tilesRenderer.setResolutionFromRenderer(this.camera, this.renderer);
@@ -446,57 +476,59 @@ export class Viewer {
       this.fetchComponentBboxes(id),
       this.fetchGeorefRotationDeg(id),
     ]);
-    this.tiledMetadataByFile = indexMetadataByFile(metadataObjects);
-    this.tiledComponentCentroids = computeTiledCentroids(componentBboxes);
 
-    // Georef positioning (design-checkpoint sign-off item 2): never trust mago's own
-    // boundingVolume.region (garbage -- task2-findings.md, binding) -- apply this platform's
-    // own resolved rotation instead, via the SAME rotation math the GLB path above uses
-    // (applyGeorefRotation itself), so the two backends can never disagree on sign convention.
-    //
-    // Reload-race guard, mirroring the GLB branch's applyGeorefRotationIfStillCurrent above
-    // (PR #14 verification's adversarial finding): the awaits feeding rotationDeg are a window
-    // where a concurrent loadModel()/loadTilesModel() call could already have replaced
-    // this.tilesRenderer. tilesRenderer here is a local const, so re-reading it can't
-    // null-dereference the way the GLB path's `this.modelGroup` could -- but applying a
-    // rotation to a now-detached instance would still be wrong (and, left unremoved by
-    // unloadModel() since that only ever touches the CURRENT this.tilesRenderer, would leak
-    // a stale tileset in the scene). Inlined rather than routed through
-    // applyGeorefRotationIfStillCurrent since rotationDeg is already resolved (bundled into
-    // the Promise.all above, not a standalone fetch) -- the check itself is the same shape,
-    // just applied directly rather than wrapped around an await. Only the rotation/matrix
-    // update is guarded here, matching the GLB path's own narrow scope -- the rest of this
-    // function's post-await work (bbox, modelInfo, fitToModel, emit) is unguarded; see the
-    // follow-up list for the real fix.
-    if (this.tilesRenderer === tilesRenderer) {
+    // Reload-race guard (PR #14 verification's adversarial finding, then its own follow-up):
+    // the awaits feeding rotationDeg/metadataObjects/componentBboxes are a window where a
+    // concurrent loadModel()/loadTilesModel() call could already have replaced
+    // this.tilesRenderer. An earlier version of this guard covered only the rotation-
+    // application call, leaving this.tiledMetadataByFile/this.tiledComponentCentroids
+    // mutated unconditionally one line above it (and bbox/modelInfo/fitToModel/emit further
+    // below) -- the identical unguarded-continuation gap the GLB branch had.
+    // runIfStillCurrent() now wraps EVERYTHING from here on: if stale, none of this.*
+    // mutates, no rotation/matrix update happens, and no modelLoaded event fires for a
+    // superseded load (closing design-checkpoint (b)'s own disclosed asymmetry with the GLB
+    // branch -- a superseded tiles load can no longer move the camera or emit modelLoaded
+    // after a newer model is current). tilesRenderer here is a local const (captured at this
+    // method's own start), so this is the same identity-check shape as the GLB branch's
+    // loadedGroup, just compared against this.tilesRenderer instead of this.modelGroup.
+    return runIfStillCurrent(tilesRenderer, () => this.tilesRenderer, () => {
+      this.tiledMetadataByFile = indexMetadataByFile(metadataObjects);
+      this.tiledComponentCentroids = computeTiledCentroids(componentBboxes);
+
+      // Georef positioning (design-checkpoint sign-off item 2): never trust mago's own
+      // boundingVolume.region (garbage -- task2-findings.md, binding) -- apply this
+      // platform's own resolved rotation instead, via the SAME rotation math the GLB path
+      // above uses (applyGeorefRotation itself), so the two backends can never disagree on
+      // sign convention.
       applyGeorefRotation(asObject3D(tilesRenderer.group), rotationDeg);
       asObject3D(tilesRenderer.group).updateMatrixWorld(true);
-    }
 
-    // getBoundingSphere() returns the sphere in the group's LOCAL space (3d-tiles-renderer's
-    // own API doc) -- must be transformed into world space to reflect the rotation just
-    // applied above, or bbox/camera-framing math would silently use the pre-rotation extent.
-    const sphere = new THREE.Sphere();
-    tilesRenderer.getBoundingSphere(sphere);
-    sphere.applyMatrix4(asObject3D(tilesRenderer.group).matrixWorld);
-    const bbox: BoundingBox = {
-      min: { x: sphere.center.x - sphere.radius, y: sphere.center.y - sphere.radius, z: sphere.center.z - sphere.radius },
-      max: { x: sphere.center.x + sphere.radius, y: sphere.center.y + sphere.radius, z: sphere.center.z + sphere.radius },
-    };
+      // getBoundingSphere() returns the sphere in the group's LOCAL space (3d-tiles-
+      // renderer's own API doc) -- must be transformed into world space to reflect the
+      // rotation just applied above, or bbox/camera-framing math would silently use the
+      // pre-rotation extent.
+      const sphere = new THREE.Sphere();
+      tilesRenderer.getBoundingSphere(sphere);
+      sphere.applyMatrix4(asObject3D(tilesRenderer.group).matrixWorld);
+      const bbox: BoundingBox = {
+        min: { x: sphere.center.x - sphere.radius, y: sphere.center.y - sphere.radius, z: sphere.center.z - sphere.radius },
+        max: { x: sphere.center.x + sphere.radius, y: sphere.center.y + sphere.radius, z: sphere.center.z + sphere.radius },
+      };
 
-    const modelInfo: ModelInfo = {
-      id,
-      name,
-      format: 'tiles',
-      objectCount: metadataObjects.length,
-      bbox,
-    };
+      const modelInfo: ModelInfo = {
+        id,
+        name,
+        format: 'tiles',
+        objectCount: metadataObjects.length,
+        bbox,
+      };
 
-    this.fitToModel();
-    this.events.emit('modelLoaded', modelInfo);
-    this.pluginHost.notifyModelLoaded(modelInfo);
+      this.fitToModel();
+      this.events.emit('modelLoaded', modelInfo);
+      this.pluginHost.notifyModelLoaded(modelInfo);
 
-    return modelInfo;
+      return modelInfo;
+    });
   }
 
   /** metadataUrl is null when the model has no metadata.json (predates Task 2, or isn't a

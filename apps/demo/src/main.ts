@@ -56,7 +56,9 @@ async function loadNewestReadyModel(): Promise<void> {
     }
     appendLog(`auto-loading newest ready model "${newestReady.name}"...`);
     const modelInfo = await viewer.loadModel(newestReady.artifactUrl);
-    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
+    // undefined means this call lost a reload race (a later loadModel() call already
+    // superseded it) -- nothing to log, the superseding call already has its own log line.
+    if (modelInfo) appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to reach the API: ${(err as Error).message}`);
   }
@@ -77,7 +79,7 @@ async function loadFile(file: File): Promise<void> {
   try {
     const buffer = await file.arrayBuffer();
     const modelInfo = await viewer.loadModel(buffer);
-    appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
+    if (modelInfo) appendLog(`loaded "${modelInfo.name}": ${modelInfo.objectCount} objects`);
   } catch (err) {
     appendLog(`failed to load ${file.name}: ${(err as Error).message}`);
   }
@@ -192,7 +194,7 @@ async function pollUntilDone(modelId: string, token: PollCancelToken, label: str
     if (record.status === 'ready') {
       try {
         const modelInfo = await viewer.loadModel({ id: modelId, name: record.name });
-        appendLog(`upload ${label}: loaded "${modelInfo.name}" -- ${modelInfo.objectCount} objects`);
+        if (modelInfo) appendLog(`upload ${label}: loaded "${modelInfo.name}" -- ${modelInfo.objectCount} objects`);
       } catch (err) {
         appendLog(`upload ${label}: status is ready, but loading the artifact failed: ${(err as Error).message}`);
       }
